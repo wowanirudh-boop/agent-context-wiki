@@ -58,7 +58,7 @@ function LoginFormInner() {
         }),
       )
       if (error) {
-        setError(error.message)
+        setError(getAuthErrorMessage(error))
       }
     } catch (err) {
       setError(getAuthErrorMessage(err))
