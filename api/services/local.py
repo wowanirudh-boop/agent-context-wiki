@@ -93,6 +93,15 @@ class LocalKBService(KBService):
         await self.db.commit()
         return await self.get(kb_id)
 
+    async def update_sharing(
+        self, kb_id: str, visibility: str, public_slug: str | None,
+    ) -> dict | None:
+        raise HTTPException(
+            status_code=400,
+            detail="Wiki sharing isn't available in local mode. Run the hosted "
+            "version (or use llmwiki.app) to publish a wiki.",
+        )
+
     async def delete(self, kb_id: str) -> bool:
         raise HTTPException(status_code=400, detail="Cannot delete the workspace in local mode")
 
@@ -351,3 +360,6 @@ class LocalServiceFactory(ServiceFactory):
 
     def document_service(self, user_id: str) -> LocalDocumentService:
         return LocalDocumentService(self.db, user_id)
+
+    def public_wiki_service(self):
+        raise HTTPException(status_code=404, detail="Public wikis aren't available in local mode.")

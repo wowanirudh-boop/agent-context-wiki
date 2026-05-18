@@ -230,9 +230,11 @@ else:
     from routes.admin import router as admin_router
     from routes.graph import router as graph_router
     from routes.ws import router as ws_router
+    from routes.public import router as public_router
     from infra.tus import router as tus_router
     app.include_router(api_keys_router)
     app.include_router(admin_router)
     app.include_router(tus_router)
     app.include_router(graph_router)
     app.include_router(ws_router)
+    app.include_router(public_router)

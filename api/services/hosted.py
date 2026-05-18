@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from config import settings
 from services.chunker import chunk_text, store_chunks
-from .base import UserService, KBService, DocumentService, ServiceFactory
+from .base import UserService, KBService, DocumentService, PublicWikiService, ServiceFactory
 from .types import parse_frontmatter, title_from_filename, extract_tags
 
 
@@ -180,6 +180,44 @@ class HostedKBService(KBService):
             "VALUES ($1, $2, 'log.md', 'Log', '/wiki/', 'md', 'ready', $3, $4, 0, 100)",
             kb_id, self.user_id, _LOG_TEMPLATE.format(name=name, date=today), ["log"],
         )
+
+    async def update_sharing(
+        self, kb_id: str, visibility: str, public_slug: str | None,
+    ) -> dict | None:
+        if visibility == "public" and public_slug is None:
+            existing = await self.pool.fetchval(
+                "SELECT public_slug FROM knowledge_bases WHERE id = $1 AND user_id = $2",
+                kb_id, self.user_id,
+            )
+            if existing is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="public_slug is required when publishing a KB for the first time",
+                )
+
+        try:
+            row = await self.pool.fetchrow(
+                "UPDATE knowledge_bases "
+                "SET visibility = $1::kb_visibility, "
+                "    public_slug = CASE WHEN $1 = 'public' THEN COALESCE($2, public_slug) ELSE public_slug END, "
+                "    visibility_updated_at = now(), "
+                "    published_at = CASE WHEN $1 = 'public' AND published_at IS NULL THEN now() ELSE published_at END, "
+                "    updated_at = now() "
+                "WHERE id = $3 AND user_id = $4 "
+                "RETURNING id, user_id, name, slug, description, "
+                "          visibility::text AS visibility, public_slug, share_token, "
+                "          visibility_updated_at, published_at, created_at, updated_at",
+                visibility, public_slug, kb_id, self.user_id,
+            )
+        except asyncpg.UniqueViolationError as e:
+            if getattr(e, "constraint_name", "") == "idx_knowledge_bases_public_slug":
+                raise HTTPException(status_code=409, detail="That public slug is already taken — try another.")
+            raise
+        except asyncpg.CheckViolationError as e:
+            if getattr(e, "constraint_name", "") == "knowledge_bases_public_slug_format":
+                raise HTTPException(status_code=400, detail="Slug must be 2–80 lowercase characters, digits, or hyphens (no leading/trailing hyphen).")
+            raise
+        return dict(row) if row else None
 
     async def delete(self, kb_id: str) -> bool:
         result = await self.pool.execute(
@@ -784,6 +822,87 @@ class HostedDocumentService(DocumentService):
         return count
 
 
+class HostedPublicWikiService(PublicWikiService):
+    """Anonymous read-only access to wikis with visibility = 'public'."""
+
+    def __init__(self, pool, s3=None):
+        self.pool = pool
+        self.s3 = s3
+
+    async def get_by_slug(self, slug: str) -> dict | None:
+        kb = await self.pool.fetchrow(
+            "SELECT id::text, user_id::text, name, slug, description, "
+            "       public_slug, published_at, updated_at "
+            "FROM knowledge_bases "
+            "WHERE public_slug = $1 AND visibility = 'public'",
+            slug,
+        )
+        if not kb:
+            return None
+
+        # Re-applies the visibility filter via JOIN so a flip between the two
+        # queries can't leak content from a wiki that was just revoked.
+        docs = await self.pool.fetch(
+            "SELECT d.id::text, d.document_number, d.filename, d.path, d.title, "
+            "       d.content, d.file_type, d.tags, d.updated_at "
+            "FROM documents d "
+            "JOIN knowledge_bases kb ON kb.id = d.knowledge_base_id "
+            "WHERE kb.public_slug = $1 "
+            "  AND kb.visibility = 'public' "
+            "  AND d.path LIKE '/wiki/%' "
+            "  AND d.status = 'ready' "
+            "  AND NOT d.archived "
+            "ORDER BY d.path, COALESCE(d.sort_order, 0), d.filename",
+            slug,
+        )
+
+        author = await self.pool.fetchrow(
+            "SELECT display_name FROM users WHERE id = $1",
+            kb["user_id"],
+        )
+
+        return {
+            "kb": {
+                "id": kb["id"],
+                "name": kb["name"],
+                "description": kb["description"],
+                "public_slug": kb["public_slug"],
+                "published_at": kb["published_at"].isoformat() if kb["published_at"] else None,
+                "updated_at": kb["updated_at"].isoformat() if kb["updated_at"] else None,
+                "author_name": author["display_name"] if author and author["display_name"] else None,
+            },
+            "documents": [dict(d) for d in docs],
+        }
+
+    async def get_asset_key(self, slug: str, document_number: int) -> str | None:
+        row = await self.pool.fetchrow(
+            "SELECT d.id::text AS doc_id, d.user_id::text AS user_id, "
+            "       d.filename, d.file_type "
+            "FROM documents d "
+            "JOIN knowledge_bases kb ON kb.id = d.knowledge_base_id "
+            "WHERE kb.public_slug = $1 "
+            "  AND kb.visibility = 'public' "
+            "  AND d.document_number = $2 "
+            "  AND d.path LIKE '/wiki/%' "
+            "  AND d.status = 'ready' "
+            "  AND NOT d.archived",
+            slug, document_number,
+        )
+        if not row:
+            return None
+
+        ext = (
+            row["filename"].rsplit(".", 1)[-1].lower()
+            if "." in row["filename"]
+            else row["file_type"]
+        )
+        if ext in {"pptx", "ppt", "docx", "doc"}:
+            return f"{row['user_id']}/{row['doc_id']}/converted.pdf"
+        if ext in {"html", "htm"}:
+            return f"{row['user_id']}/{row['doc_id']}/tagged.html"
+        return f"{row['user_id']}/{row['doc_id']}/source.{ext}"
+
+
 class HostedServiceFactory(ServiceFactory):
 
     def __init__(self, pool, s3=None, ocr=None):
@@ -799,3 +918,6 @@ class HostedServiceFactory(ServiceFactory):
 
     def document_service(self, user_id: str) -> HostedDocumentService:
         return HostedDocumentService(self.pool, user_id, self.s3)
+
+    def public_wiki_service(self) -> HostedPublicWikiService:
+        return HostedPublicWikiService(self.pool, self.s3)

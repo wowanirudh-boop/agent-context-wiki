@@ -32,7 +32,22 @@ class KBService(ABC):
     async def update(self, kb_id: str, name: str | None, description: str | None) -> dict | None: ...
 
     @abstractmethod
+    async def update_sharing(
+        self, kb_id: str, visibility: str, public_slug: str | None,
+    ) -> dict | None: ...
+
+    @abstractmethod
     async def delete(self, kb_id: str) -> bool: ...
+
+
+class PublicWikiService(ABC):
+    """Anonymous read-only access. Implementations hardcode visibility = 'public'."""
+
+    @abstractmethod
+    async def get_by_slug(self, slug: str) -> dict | None: ...
+
+    @abstractmethod
+    async def get_asset_key(self, slug: str, document_number: int) -> str | None: ...
 
 
 class DocumentService(ABC):
@@ -105,3 +120,6 @@ class ServiceFactory(ABC):
 
     @abstractmethod
     def document_service(self, user_id: str) -> DocumentService: ...
+
+    @abstractmethod
+    def public_wiki_service(self) -> PublicWikiService: ...

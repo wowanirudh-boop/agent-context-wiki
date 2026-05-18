@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from deps import get_kb_service
 from services.base import KBService
-from services.types import CreateKB, UpdateKB
+from services.types import CreateKB, UpdateKB, UpdateSharing
 
 router = APIRouter(prefix="/v1/knowledge-bases", tags=["knowledge-bases"])
 
@@ -33,6 +33,24 @@ async def update_knowledge_base(kb_id: UUID, body: UpdateKB, service: Annotated[
     if not body.name and not body.description:
         raise HTTPException(status_code=400, detail="No fields to update")
     row = await service.update(str(kb_id), body.name, body.description)
+    if not row:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    return row
+
+
+@router.patch("/{kb_id}/sharing")
+async def update_knowledge_base_sharing(
+    kb_id: UUID,
+    body: UpdateSharing,
+    service: Annotated[KBService, Depends(get_kb_service)],
+):
+    slug = body.validated_slug()
+    if body.public_slug is not None and slug is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Slug must be 2–80 lowercase characters, digits, or hyphens (no leading/trailing hyphen).",
+        )
+    row = await service.update_sharing(str(kb_id), body.visibility, slug)
     if not row:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     return row

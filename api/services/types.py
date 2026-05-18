@@ -46,6 +46,23 @@ class UpdateKB(BaseModel):
     description: str | None = None
 
 
+# Mirrors the DB CHECK constraint on knowledge_bases.public_slug.
+_PUBLIC_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,78}[a-z0-9]$")
+
+
+class UpdateSharing(BaseModel):
+    visibility: Literal["private", "shared", "public"]
+    public_slug: str | None = Field(default=None, max_length=80)
+
+    def validated_slug(self) -> str | None:
+        if self.public_slug is None:
+            return None
+        slug = self.public_slug.strip().lower()
+        if not _PUBLIC_SLUG_RE.match(slug):
+            return None
+        return slug
+
+
 class CreateNote(BaseModel):
     filename: str
     path: str = "/"
