@@ -42,6 +42,7 @@
     "postcss": "8.5.10",
     "ws": "8.20.1",
     "tmp": "0.2.6",
+    "shell-quote": "1.8.4",
     "uuid": "14.0.0",
     "minimatch": "10.2.3",
     "multimatch": {
