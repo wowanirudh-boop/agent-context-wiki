@@ -1,0 +1,37 @@
+name: ci
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r api/requirements.txt
+          pip install -r mcp/requirements.txt
+          if [ -f core/requirements.txt ]; then pip install -r core/requirements.txt; fi
+          if [ -f tests/requirements.txt ]; then pip install -r tests/requirements.txt; fi
+          pip install ruff pytest pytest-asyncio pytest-cov hypothesis markdown-it-py
+      - name: Lint
+        run: ruff check .
+      - name: Unit + v2 tests (hermetic — no network, no API keys)
+        env:
+          ACW_LLM_PROVIDER: fake-rules
+        run: |
+          pytest tests/unit -q
+          if [ -d tests/v2 ]; then pytest tests/v2 -q --cov=core --cov-fail-under=0; fi
+      - name: Coverage gate (core/, from phase M4 onward)
+        if: ${{ hashFiles('core/pipeline/run.py') != '' }}
+        env:
+          ACW_LLM_PROVIDER: fake-rules
+        run: pytest tests/v2 -q --cov=core --cov-fail-under=85
