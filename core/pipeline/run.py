@@ -9,6 +9,7 @@ import aiosqlite
 from core.config import ACWConfig, load_config
 from core.db.dao import ACWDao, Row
 from core.db.migrate import apply_migrations
+from core.gitops import commit_processing_run, ensure_wiki_repo, mark_user_edited_blocks
 from core.ledger import ChunkLedger
 from core.llm.calls import (
     C1_SCHEMA,
@@ -46,10 +47,12 @@ async def run_processing_run(
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA foreign_keys=ON")
         await apply_migrations(db)
+        ensure_wiki_repo(ws)
         dao = ACWDao(db)
         run = await dao.create_run()
         run_id = str(run["id"])
         await dao.write_event(kind=EventKind.run_started, actor="core.pipeline.run", payload={"run_id": run_id})
+        user_edited_blocks = await mark_user_edited_blocks(ws, db)
         llm = provider or provider_from_config(ws, dao=dao)
         ledger = ChunkLedger(dao, max_attempts=cfg.max_attempts)
         registry = PageRegistry(dao)
@@ -65,6 +68,7 @@ async def run_processing_run(
             "page_writes": 0,
             "unresolved_reviews": len(unresolved_reviews),
             "unresolved_review_files": unresolved_reviews,
+            "user_edited_blocks": len(user_edited_blocks),
         }
         calls_before = _provider_call_count(llm)
         try:
@@ -97,6 +101,13 @@ async def run_processing_run(
                 raise RuntimeError(f"Processing run left {pending} pending chunk(s)")
             await dao.finish_run(run_id, status=RunStatus.completed, stats=stats)
             await dao.write_event(kind=EventKind.run_completed, actor="core.pipeline.run", payload={"run_id": run_id})
+            commit = commit_processing_run(ws, run_id)
+            if commit.committed:
+                await dao.write_event(
+                    kind=EventKind.git_commit,
+                    actor="core.gitops",
+                    payload={"trigger": "process", "run_id": run_id, "sha": commit.sha, "message": commit.message},
+                )
             return ProcessingRunResult(run_id=run_id, stats=stats)
         except Exception as exc:
             await dao.finish_run(run_id, status=RunStatus.aborted, stats={**stats, "error": str(exc)})

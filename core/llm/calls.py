@@ -12,11 +12,13 @@ from core.models import BlockType, ConflictType, ReviewDecision
 C1_PLACEMENT_TEMPLATE = "Classify and place source chunks into source-backed context blocks."
 C2_FLOW_TEMPLATE = "Convert a structured flow definition into Mermaid while preserving nodes and edges."
 C3_CONFLICT_TEMPLATE = "Judge whether a candidate context block duplicates or conflicts with an existing block."
+C4_MERGE_TEMPLATE = "Draft a merged context block candidate from two conflicting blocks."
 C6_TRANSCRIPT_TEMPLATE = "Classify transcript segments and mark intra-transcript supersession."
 
 C1_SCHEMA: StructuredSchema = {"type": "object", "required": ["chunks"]}
 C2_SCHEMA: StructuredSchema = {"type": "object", "required": ["mermaid", "nodes", "edges"]}
 C3_SCHEMA: StructuredSchema = {"type": "object", "required": ["verdict", "conflict_type", "recommendation", "rationale"]}
+C4_SCHEMA: StructuredSchema = {"type": "object", "required": ["content", "excerpt_policy"]}
 C6_SCHEMA: StructuredSchema = {"type": "object", "required": ["segments"]}
 
 
@@ -103,6 +105,15 @@ def validate_c3_response(payload: StructuredPayload, response: StructuredRespons
         raise CallValidationError(f"Unknown C3 recommendation: {recommendation}")
     if not _string(response, "rationale").strip():
         raise CallValidationError("C3 rationale is required")
+    return response
+
+
+def validate_c4_response(payload: StructuredPayload, response: StructuredResponse) -> StructuredResponse:
+    del payload
+    if not _string(response, "content").strip():
+        raise CallValidationError("C4 content is required")
+    if _string(response, "excerpt_policy") != "keep_both":
+        raise CallValidationError("C4 excerpt_policy must be keep_both")
     return response
 
 

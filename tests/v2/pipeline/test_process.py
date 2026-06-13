@@ -76,6 +76,38 @@ def test_fr_place_08_llmwiki_process_cli_uses_fake_rules_provider(tmp_path, monk
     assert any("<!-- cb " in path.read_text(encoding="utf-8") for path in (workspace / "wiki").glob("*.md"))
 
 
+def test_fr_rev_04_m6_dod_uc1_process_decide_apply_loop(tmp_path, monkeypatch) -> None:
+    from core.blocks.parser import parse_page
+
+    workspace = tmp_path / "uc1_minimal"
+    shutil.copytree(FIXTURE_ROOT / "uc1_minimal", workspace)
+    monkeypatch.setenv("ACW_LLM_PROVIDER", "fake-rules")
+    module = _load_llmwiki_module()
+
+    module.cmd_init(str(workspace))
+    module.cmd_reindex(str(workspace))
+    module.cmd_process(str(workspace))
+    review_path = next((workspace / "wiki" / "_reviews").glob("RR-*.md"))
+    review_path.write_text(
+        review_path.read_text(encoding="utf-8").replace("- decision:", "- decision: accept_new"),
+        encoding="utf-8",
+    )
+
+    module.cmd_apply_decisions(str(workspace))
+
+    page_path = next((workspace / "wiki").glob("refunds*.md"))
+    blocks = parse_page(page_path.read_text(encoding="utf-8")).blocks
+    subjects = _git_log_subjects(workspace / "wiki")
+    assert any(block.status == "deprecated" for block in blocks)
+    assert any(block.status == "current" and block.source_path == "docs/tnc.md" for block in blocks)
+    assert all(not block.pending_review_ids for block in blocks)
+    assert subjects[:2] == [
+        f"acw apply-decisions: {review_path.name}",
+        next(subject for subject in subjects if subject.startswith("acw process: ")),
+    ]
+    assert_invariants(workspace)
+
+
 @pytest.mark.asyncio
 async def test_fr_conf_02_fr_conf_05_uc1_retry_count_conflict_emits_review_without_overwrite(tmp_path) -> None:
     from core.blocks.parser import parse_page
@@ -123,3 +155,16 @@ def _page_texts(workspace: Path) -> dict[str, str]:
         path.relative_to(workspace).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted((workspace / "wiki").rglob("*.md"))
     }
+
+
+def _git_log_subjects(wiki: Path) -> list[str]:
+    import subprocess
+
+    completed = subprocess.run(
+        ["git", "log", "--format=%s"],
+        cwd=wiki,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.splitlines()

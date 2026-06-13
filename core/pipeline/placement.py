@@ -17,6 +17,7 @@ from core.blocks.serializer import serialize_page, write_page
 from core.conflicts.detect import detect_candidate_conflict
 from core.conflicts.markers import apply_pending_conflict_marker
 from core.db.dao import ACWDao, Row, json_dumps, utc_now
+from core.gitops import annotate_recommendation_basis
 from core.ids import new_id
 from core.ledger import ChunkLedger
 from core.llm.provider import LLMProvider
@@ -99,6 +100,7 @@ class PlacementWriter:
             )
             return PlacementOutcome(kind="duplicate", block_id=detection.existing.block.id)
         if detection.kind == "conflict" and detection.existing is not None:
+            recommendation = detection.recommendation.value if detection.recommendation is not None else "needs_more_info"
             row = await self.dao.create_review_row(
                 run_id=self.run_id,
                 page_id=str(page["id"]),
@@ -106,8 +108,12 @@ class PlacementWriter:
                 existing_block_id=detection.existing.block.id,
                 candidate_json=json_dumps(block.model_dump(mode="json")),
                 conflict_type=detection.conflict_type.value if detection.conflict_type is not None else None,
-                recommendation=detection.recommendation.value if detection.recommendation is not None else "needs_more_info",
-                recommendation_basis=detection.recommendation_basis,
+                recommendation=recommendation,
+                recommendation_basis=annotate_recommendation_basis(
+                    detection.recommendation_basis,
+                    recommendation,
+                    user_edited=detection.existing.block.user_edited,
+                ),
             )
             await self.ledger.mark_conflicted_pending(
                 str(chunk["id"]),

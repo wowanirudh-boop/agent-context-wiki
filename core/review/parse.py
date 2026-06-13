@@ -75,7 +75,13 @@ def _notes(section: str) -> str:
     match = re.search(r"^- notes:[ \t]*(?P<notes>[^\r\n]*)$", section, re.MULTILINE)
     if match is None:
         return ""
-    return match.group("notes").strip()
+    first_line = match.group("notes").strip()
+    continuation = section[match.end() :].strip("\r\n")
+    if not continuation.strip():
+        return first_line
+    if not first_line:
+        return continuation.strip()
+    return f"{first_line}\n{continuation.strip()}"
 
 
 def _validate_decision(row_kind: str, decision: str | None) -> list[str]:
