@@ -14,6 +14,7 @@ class ACWConfig:
     llm_base_url: str | None = None
     llm_model: str = "gpt-5"
     llm_model_light: str | None = None
+    llm_provider: str = "openai"
     auto_process: bool = False
     max_attempts: int = 3
     needs_review_stale_days: int = 14
@@ -26,6 +27,7 @@ _ENV_TO_FIELD = {
     "ACW_LLM_BASE_URL": "llm_base_url",
     "ACW_LLM_MODEL": "llm_model",
     "ACW_LLM_MODEL_LIGHT": "llm_model_light",
+    "ACW_LLM_PROVIDER": "llm_provider",
     "ACW_AUTO_PROCESS": "auto_process",
     "ACW_MAX_ATTEMPTS": "max_attempts",
     "ACW_NEEDS_REVIEW_STALE_DAYS": "needs_review_stale_days",

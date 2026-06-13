@@ -8,6 +8,7 @@ Usage:
     llmwiki mcp <workspace>          Run stdio MCP server (for Claude config)
     llmwiki mcp-config <workspace>   Print claude_desktop_config.json snippet
     llmwiki reindex <workspace>      Force full rebuild of index.db
+    llmwiki process <workspace>      Run the v2 placement pipeline
 """
 
 import argparse
@@ -277,6 +278,25 @@ def cmd_reindex(workspace: str) -> None:
     print(f"OK Reindexed workspace: {ws}")
 
 
+def cmd_process(workspace: str) -> None:
+    ws = Path(workspace).resolve()
+    db_path = ws / ".llmwiki" / "index.db"
+    if not db_path.exists():
+        cmd_init(str(ws))
+    else:
+        _apply_acw_migrations(ws)
+        _index_existing_files(ws, db_path, "", "")
+
+    from core.pipeline.run import run_processing_run
+
+    result = asyncio.run(run_processing_run(ws))
+    print(f"OK Processed workspace: {ws}")
+    print(f"  run: {result.run_id}")
+    print(f"  pending: {result.stats.get('pending', 0)}")
+    print(f"  placed: {result.stats.get('placed', 0)}")
+    print(f"  page_writes: {result.stats.get('page_writes', 0)}")
+
+
 def _apply_acw_migrations(ws: Path) -> None:
     from core.db.migrate import migrate_workspace
 
@@ -309,6 +329,9 @@ def main():
     p_reindex = sub.add_parser("reindex", help="Force full rebuild of index")
     p_reindex.add_argument("workspace", help="Path to workspace folder")
 
+    p_process = sub.add_parser("process", help="Run the v2 placement pipeline")
+    p_process.add_argument("workspace", help="Path to workspace folder")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -327,6 +350,8 @@ def main():
         cmd_mcp_config(args.workspace, getattr(args, "name", None))
     elif args.command == "reindex":
         cmd_reindex(args.workspace)
+    elif args.command == "process":
+        cmd_process(args.workspace)
 
 
 if __name__ == "__main__":
