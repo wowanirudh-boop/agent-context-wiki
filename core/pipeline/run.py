@@ -21,6 +21,7 @@ from core.llm.calls import (
     validate_c6_response,
 )
 from core.llm.provider import LLMProvider, provider_from_config
+from core.lock import WorkspaceLock
 from core.models import EventKind, RunStatus
 from core.pipeline.batching import batch_chunks_by_source
 from core.pipeline.flows import extract_flow_mermaid
@@ -44,6 +45,17 @@ async def run_processing_run(
     config: ACWConfig | None = None,
 ) -> ProcessingRunResult:
     ws = Path(workspace)
+    with WorkspaceLock(ws, "process") as lock:
+        return await _run_processing_run_locked(ws, provider=provider, config=config, lock_stolen=lock.stolen)
+
+
+async def _run_processing_run_locked(
+    ws: Path,
+    *,
+    provider: LLMProvider | None = None,
+    config: ACWConfig | None = None,
+    lock_stolen: bool = False,
+) -> ProcessingRunResult:
     db_path = ws / ".llmwiki" / "index.db"
     cfg = config or load_config(ws)
     async with aiosqlite.connect(db_path) as db:
@@ -51,6 +63,11 @@ async def run_processing_run(
         await apply_migrations(db)
         ensure_wiki_repo(ws)
         dao = ACWDao(db)
+        await dao.write_event(
+            kind=EventKind.lock_stolen if lock_stolen else EventKind.lock_acquired,
+            actor="core.lock",
+            payload={"op": "process"},
+        )
         run = await dao.create_run()
         run_id = str(run["id"])
         await dao.write_event(kind=EventKind.run_started, actor="core.pipeline.run", payload={"run_id": run_id})

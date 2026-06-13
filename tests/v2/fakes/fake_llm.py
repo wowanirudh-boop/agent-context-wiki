@@ -383,6 +383,12 @@ def _block_shape(text: str, source_path: str) -> tuple[str, str, str]:
     source_segment = _source_segment(source_path)
     if "q:" in lowered or "a:" in lowered:
         return f"refunds.{source_segment}.faq", "faq", "FAQs"
+    if "requirement" in lowered:
+        if "retry exhaustion" in lowered or "provider failures" in lowered:
+            return "refunds.provider_escalation", "requirement", "Requirements"
+        if "approved" in lowered or "rejected" in lowered:
+            return "refunds.approval_notification", "requirement", "Requirements"
+        return f"refunds.{source_segment}.requirement", "requirement", "Requirements"
     if "maxretries" in lowered or _has_retry_count_value(text):
         block_type = "api" if "maxretries" in lowered else "rule"
         section = "API Details" if "maxretries" in lowered else "Rules"
@@ -391,8 +397,6 @@ def _block_shape(text: str, source_path: str) -> tuple[str, str, str]:
         return "refunds.window_days", "rule", "Rules"
     if "endpoint:" in lowered or "request fields" in lowered:
         return f"refunds.{source_segment}.endpoint", "api", "API Details"
-    if "requirement" in lowered:
-        return f"refunds.{source_segment}.requirement", "requirement", "Requirements"
     if "decision" in lowered:
         return "webhooks.retries.decision", "decision", "Decisions"
     return f"refunds.{source_segment}.note", "note", "Historical Notes"

@@ -10,6 +10,11 @@ Usage:
     llmwiki reindex <workspace>      Force full rebuild of index.db
     llmwiki process <workspace>      Run the v2 placement pipeline
     llmwiki apply-decisions <workspace> [review_file]
+    llmwiki lint <workspace> [--json]
+    llmwiki eval <workspace> [--json] [--update-baseline]
+    llmwiki merge-pages <workspace> <source_page> <target_page>
+    llmwiki split-page <workspace> <page> <section> --new-title <title>
+    llmwiki rename-page <workspace> <page> <new_title>
     llmwiki coverage <workspace> [source]
     llmwiki hard-delete <workspace> --block-id <block_id>
 """
@@ -263,6 +268,13 @@ def cmd_reindex(workspace: str) -> None:
         print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
         sys.exit(1)
 
+    from core.lock import WorkspaceLock
+
+    with WorkspaceLock(ws, "reindex"):
+        _cmd_reindex_locked(ws, db_path)
+
+
+def _cmd_reindex_locked(ws: Path, db_path: Path) -> None:
     # Drop rebuildable extraction tables; keep documents so source ids remain path-stable.
     import sqlite3
     conn = sqlite3.connect(str(db_path))
@@ -322,6 +334,79 @@ def cmd_apply_decisions(workspace: str, review_file: str | None = None) -> None:
     print(f"  committed: {result.committed}")
 
 
+def cmd_lint(workspace: str, *, json_output: bool = False) -> int:
+    ws = Path(workspace).resolve()
+    db_path = ws / ".llmwiki" / "index.db"
+    if not db_path.exists():
+        print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
+        return 1
+    _apply_acw_migrations(ws)
+
+    from core.lint.runner import findings_to_json_lines, findings_to_table, has_errors, lint_workspace
+
+    findings = asyncio.run(lint_workspace(ws))
+    output = findings_to_json_lines(findings) if json_output else findings_to_table(findings)
+    print(output, end="")
+    return 1 if has_errors(findings) else 0
+
+
+def cmd_eval(workspace: str, *, update_baseline: bool = False, json_output: bool = False) -> int:
+    ws = Path(workspace).resolve()
+    db_path = ws / ".llmwiki" / "index.db"
+    if not db_path.exists():
+        print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
+        return 1
+
+    from core.eval.harness import evaluate_workspace
+
+    result = asyncio.run(evaluate_workspace(ws, update_baseline=update_baseline))
+    if json_output:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"Eval score: {result.passed}/{result.total} ({result.score:.3f})")
+        if result.baseline_score is not None:
+            print(f"Baseline: {result.baseline_score:.3f}")
+        if result.regressed:
+            print("Regression detected.", file=sys.stderr)
+    return 1 if result.regressed else 0
+
+
+def cmd_merge_pages(workspace: str, source_page: str, target_page: str) -> int:
+    ws = Path(workspace).resolve()
+    _apply_acw_migrations(ws)
+    from core.taxonomy import merge_pages
+
+    result = asyncio.run(merge_pages(ws, source_page, target_page))
+    print(f"OK Merged page: {source_page} -> {target_page}")
+    print(f"  changed_pages: {len(result.changed_pages)}")
+    print(f"  committed: {result.committed}")
+    return 0
+
+
+def cmd_split_page(workspace: str, page: str, section: str, *, new_title: str) -> int:
+    ws = Path(workspace).resolve()
+    _apply_acw_migrations(ws)
+    from core.taxonomy import split_page
+
+    result = asyncio.run(split_page(ws, page, section, new_title=new_title))
+    print(f"OK Split page: {page}::{section} -> {new_title}")
+    print(f"  changed_pages: {len(result.changed_pages)}")
+    print(f"  committed: {result.committed}")
+    return 0
+
+
+def cmd_rename_page(workspace: str, page: str, new_title: str) -> int:
+    ws = Path(workspace).resolve()
+    _apply_acw_migrations(ws)
+    from core.taxonomy import rename_page
+
+    result = asyncio.run(rename_page(ws, page, new_title))
+    print(f"OK Renamed page: {page} -> {new_title}")
+    print(f"  changed_pages: {len(result.changed_pages)}")
+    print(f"  committed: {result.committed}")
+    return 0
+
+
 def cmd_coverage(workspace: str, source: str | None = None) -> None:
     ws = Path(workspace).resolve()
     db_path = ws / ".llmwiki" / "index.db"
@@ -353,15 +438,17 @@ def cmd_hard_delete(workspace: str, *, block_id: str) -> None:
     import aiosqlite
 
     from core.gitops import commit_hard_delete, hard_delete_block
+    from core.lock import WorkspaceLock
 
-    async def _run() -> str:
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute("PRAGMA foreign_keys=ON")
-            result = await hard_delete_block(ws, db, block_id)
-            return result.warning
+    with WorkspaceLock(ws, "hard-delete"):
+        async def _run() -> str:
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute("PRAGMA foreign_keys=ON")
+                result = await hard_delete_block(ws, db, block_id)
+                return result.warning
 
-    warning = asyncio.run(_run())
-    commit = commit_hard_delete(ws, block_id)
+        warning = asyncio.run(_run())
+        commit = commit_hard_delete(ws, block_id)
     print(f"OK Hard-deleted block: {block_id}")
     print(f"  committed: {commit.committed}")
     print(warning)
@@ -406,6 +493,31 @@ def main():
     p_apply.add_argument("workspace", help="Path to workspace folder")
     p_apply.add_argument("review_file", nargs="?", help="Review file path; defaults to unresolved review files")
 
+    p_lint = sub.add_parser("lint", help="Run v2 invariant lint")
+    p_lint.add_argument("workspace", help="Path to workspace folder")
+    p_lint.add_argument("--json", action="store_true", help="Emit JSON lines")
+
+    p_eval = sub.add_parser("eval", help="Run golden-QA eval over wiki_* read tools")
+    p_eval.add_argument("workspace", help="Path to workspace folder")
+    p_eval.add_argument("--json", action="store_true", help="Emit JSON")
+    p_eval.add_argument("--update-baseline", action="store_true", help="Write current score as eval baseline")
+
+    p_merge = sub.add_parser("merge-pages", help="Merge one wiki page into another")
+    p_merge.add_argument("workspace", help="Path to workspace folder")
+    p_merge.add_argument("source_page", help="Page title, alias, or path to merge away")
+    p_merge.add_argument("target_page", help="Page title, alias, or path to merge into")
+
+    p_split = sub.add_parser("split-page", help="Split one section into a new page")
+    p_split.add_argument("workspace", help="Path to workspace folder")
+    p_split.add_argument("page", help="Page title, alias, or path")
+    p_split.add_argument("section", help="H2 section name to split")
+    p_split.add_argument("--new-title", required=True, help="Title for the new page")
+
+    p_rename = sub.add_parser("rename-page", help="Rename a wiki page")
+    p_rename.add_argument("workspace", help="Path to workspace folder")
+    p_rename.add_argument("page", help="Page title, alias, or path")
+    p_rename.add_argument("new_title", help="New page title")
+
     p_coverage = sub.add_parser("coverage", help="Print ledger-derived Source Coverage")
     p_coverage.add_argument("workspace", help="Path to workspace folder")
     p_coverage.add_argument("source", nargs="?", help="Optional source path, filename, or id")
@@ -436,6 +548,22 @@ def main():
         cmd_process(args.workspace)
     elif args.command == "apply-decisions":
         cmd_apply_decisions(args.workspace, getattr(args, "review_file", None))
+    elif args.command == "lint":
+        sys.exit(cmd_lint(args.workspace, json_output=getattr(args, "json", False)))
+    elif args.command == "eval":
+        sys.exit(
+            cmd_eval(
+                args.workspace,
+                update_baseline=getattr(args, "update_baseline", False),
+                json_output=getattr(args, "json", False),
+            )
+        )
+    elif args.command == "merge-pages":
+        sys.exit(cmd_merge_pages(args.workspace, args.source_page, args.target_page))
+    elif args.command == "split-page":
+        sys.exit(cmd_split_page(args.workspace, args.page, args.section, new_title=args.new_title))
+    elif args.command == "rename-page":
+        sys.exit(cmd_rename_page(args.workspace, args.page, args.new_title))
     elif args.command == "coverage":
         cmd_coverage(args.workspace, getattr(args, "source", None))
     elif args.command == "hard-delete":

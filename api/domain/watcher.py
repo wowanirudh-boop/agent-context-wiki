@@ -38,8 +38,11 @@ IGNORE_DIRS = frozenset({
 })
 
 COOLDOWN_SECONDS = 2.0
+AUTO_PROCESS_DEBOUNCE_SECONDS = 5.0
 
 _ignore_patterns: list[str] | None = None
+_auto_process_tasks: dict[str, asyncio.Task] = {}
+_auto_process_requested: set[str] = set()
 
 
 def _load_ignore_patterns(workspace: Path) -> list[str]:
@@ -310,8 +313,45 @@ async def watch_workspace(db: aiosqlite.Connection, workspace: Path) -> None:
             except Exception as e:
                 logger.warning("Watcher error for %s: %s", path_str, e)
 
+        _schedule_auto_process_if_enabled(workspace)
+
         # Clean up expired entries from _recently_written
         now = time.monotonic()
         expired = [k for k, v in _recently_written.items() if now - v > COOLDOWN_SECONDS * 2]
         for k in expired:
             _recently_written.pop(k, None)
+
+
+def auto_process_enabled(workspace: Path) -> bool:
+    from core.config import load_config
+
+    return load_config(workspace).auto_process
+
+
+def _schedule_auto_process_if_enabled(workspace: Path) -> None:
+    if not auto_process_enabled(workspace):
+        return
+    key = str(workspace.resolve())
+    _auto_process_requested.add(key)
+    task = _auto_process_tasks.get(key)
+    if task is None or task.done():
+        _auto_process_tasks[key] = asyncio.create_task(_auto_process_loop(workspace, key))
+
+
+async def _auto_process_loop(workspace: Path, key: str) -> None:
+    from core.lock import WorkspaceLockError
+    from core.pipeline.run import run_processing_run
+
+    try:
+        while key in _auto_process_requested:
+            _auto_process_requested.discard(key)
+            await asyncio.sleep(AUTO_PROCESS_DEBOUNCE_SECONDS)
+            try:
+                await run_processing_run(workspace)
+            except WorkspaceLockError:
+                _auto_process_requested.add(key)
+                await asyncio.sleep(1)
+            except Exception as exc:
+                logger.warning("Auto-process failed for %s: %s", workspace, exc)
+    finally:
+        _auto_process_tasks.pop(key, None)

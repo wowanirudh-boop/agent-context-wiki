@@ -20,6 +20,7 @@ from core.ids import new_id
 from core.ledger import ChunkLedger
 from core.llm.calls import C4_SCHEMA, complete_validated, validate_c4_response
 from core.llm.provider import LLMProvider, provider_from_config
+from core.lock import WorkspaceLock
 from core.models import BlockStatus, EventKind, ReviewDecision, ReviewRowKind, RunStatus
 from core.registry import PageRegistry
 from core.review.parse import ParsedReviewFile, ParsedReviewRow, parse_review_file
@@ -64,11 +65,27 @@ async def apply_decisions(
     provider: LLMProvider | None = None,
 ) -> ApplyDecisionsResult:
     ws = Path(workspace)
+    with WorkspaceLock(ws, "apply-decisions") as lock:
+        return await _apply_decisions_locked(ws, review_paths=review_paths, provider=provider, lock_stolen=lock.stolen)
+
+
+async def _apply_decisions_locked(
+    ws: Path,
+    *,
+    review_paths: list[str | Path] | None = None,
+    provider: LLMProvider | None = None,
+    lock_stolen: bool = False,
+) -> ApplyDecisionsResult:
     db_path = ws / ".llmwiki" / "index.db"
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA foreign_keys=ON")
         await apply_migrations(db)
         dao = ACWDao(db)
+        await dao.write_event(
+            kind=EventKind.lock_stolen if lock_stolen else EventKind.lock_acquired,
+            actor="core.lock",
+            payload={"op": "apply-decisions"},
+        )
         llm = provider or provider_from_config(ws, dao=dao)
         ensure_wiki_repo(ws)
         paths = _review_paths(ws, review_paths)
