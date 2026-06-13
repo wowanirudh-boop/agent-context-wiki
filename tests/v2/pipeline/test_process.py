@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 from pathlib import Path
 
 import aiosqlite
 import pytest
+import yaml
 
 from tests.v2.invariants import assert_invariants
 from tests.v2.unit.test_reingest import _load_llmwiki_module
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_ROOT = ROOT / "tests" / "v2" / "fixtures" / "workspaces"
+MCP_ROOT = ROOT / "mcp"
+if str(MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(MCP_ROOT))
 
 
 @pytest.mark.asyncio
@@ -150,6 +155,50 @@ async def test_fr_conf_02_fr_conf_05_uc1_retry_count_conflict_emits_review_witho
     assert result.stats["conflicted_pending"] == 1
 
 
+@pytest.mark.asyncio
+async def test_as_uc2_1_fr_read_03_bounded_read_uses_index_summaries_then_full_pages(tmp_path) -> None:
+    from tools.wiki_read import WikiReadHandler
+
+    from core.pipeline.run import run_processing_run
+    from tests.v2.fakes.fake_llm import FakeLLM
+
+    workspace = tmp_path / "uc2_nodes"
+    shutil.copytree(FIXTURE_ROOT / "uc2_nodes", workspace)
+    module = _load_llmwiki_module()
+    await asyncio.to_thread(module.cmd_init, str(workspace))
+    await asyncio.to_thread(module.cmd_reindex, str(workspace))
+
+    await run_processing_run(workspace, provider=FakeLLM.rule_based())
+
+    handler = WikiReadHandler(workspace)
+    index = await handler.wiki_index()
+    pages = _active_page_paths(workspace)
+    summaries = [await handler.wiki_summary(path) for path in pages]
+    bounded_words = _word_count(index["markdown"]) + sum(
+        _word_count(summary["summary_markdown"]) for summary in summaries
+    )
+    assert bounded_words < 4000
+
+    full_pages = [await handler.wiki_page(path) for path in pages]
+    keys = {
+        block["key"]
+        for page in full_pages
+        for block in page["blocks"]
+        if block["status"] == "current"
+    }
+    markdown = "\n".join(page["markdown"] for page in full_pages)
+    questions = yaml.safe_load((workspace / "eval" / "questions.yaml").read_text(encoding="utf-8"))
+    for question in questions:
+        for key in question["expected_keys"]:
+            assert key in keys
+        for substring in question["expected_substrings"]:
+            assert substring in markdown
+        search = await handler.wiki_search(question["question"], tier="summary", limit=3)
+        assert search["results"], question["question"]
+
+    assert_invariants(workspace)
+
+
 def _page_texts(workspace: Path) -> dict[str, str]:
     return {
         path.relative_to(workspace).as_posix(): path.read_text(encoding="utf-8")
@@ -168,3 +217,17 @@ def _git_log_subjects(wiki: Path) -> list[str]:
         text=True,
     )
     return completed.stdout.splitlines()
+
+
+def _active_page_paths(workspace: Path) -> list[str]:
+    import sqlite3
+
+    with sqlite3.connect(workspace / ".llmwiki" / "index.db") as conn:
+        return [
+            row[0]
+            for row in conn.execute("SELECT path FROM acw_pages WHERE status = 'active' ORDER BY path").fetchall()
+        ]
+
+
+def _word_count(markdown: str) -> int:
+    return len(markdown.split())

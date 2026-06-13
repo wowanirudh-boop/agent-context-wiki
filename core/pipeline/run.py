@@ -7,6 +7,7 @@ from typing import Any
 import aiosqlite
 
 from core.config import ACWConfig, load_config
+from core.coverage import render_coverage_sections
 from core.db.dao import ACWDao, Row
 from core.db.migrate import apply_migrations
 from core.gitops import commit_processing_run, ensure_wiki_repo, mark_user_edited_blocks
@@ -27,6 +28,7 @@ from core.pipeline.placement import PlacementWriter, placement_registry_payload
 from core.pipeline.transcripts import apply_transcript_prepass, resolve_transcript_duplicate_placeholders
 from core.registry import PageRegistry
 from core.review.emit import create_taxonomy_merge_review_rows, emit_review_file, find_unresolved_review_files
+from core.summary import render_summaries_and_index
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,9 +94,17 @@ async def run_processing_run(
                     stats["review_file"] = review_path.relative_to(ws).as_posix()
             pending = await _pending_count(db)
             stats["pending"] = pending
-            stats["page_writes"] = writer.page_writes
             stats["blocks_created"] = writer.blocks_created
+            coverage = await render_coverage_sections(ws, db, run_id=run_id)
+            summaries = await render_summaries_and_index(ws, db, run_id=run_id, provider=llm, config=cfg)
             stats["llm_calls"] = _provider_call_count(llm) - calls_before
+            stats["page_writes"] = (
+                writer.page_writes
+                + coverage.page_writes
+                + coverage.breakdown_writes
+                + summaries.page_writes
+                + int(summaries.index_written)
+            )
             await ledger.export_json(ws, run_id=run_id)
             await registry.export_json(ws)
             if pending:

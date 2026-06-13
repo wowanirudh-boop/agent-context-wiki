@@ -13,12 +13,14 @@ C1_PLACEMENT_TEMPLATE = "Classify and place source chunks into source-backed con
 C2_FLOW_TEMPLATE = "Convert a structured flow definition into Mermaid while preserving nodes and edges."
 C3_CONFLICT_TEMPLATE = "Judge whether a candidate context block duplicates or conflicts with an existing block."
 C4_MERGE_TEMPLATE = "Draft a merged context block candidate from two conflicting blocks."
+C5_SUMMARY_TEMPLATE = "Summarize the current context blocks on a page for bounded agent reads."
 C6_TRANSCRIPT_TEMPLATE = "Classify transcript segments and mark intra-transcript supersession."
 
 C1_SCHEMA: StructuredSchema = {"type": "object", "required": ["chunks"]}
 C2_SCHEMA: StructuredSchema = {"type": "object", "required": ["mermaid", "nodes", "edges"]}
 C3_SCHEMA: StructuredSchema = {"type": "object", "required": ["verdict", "conflict_type", "recommendation", "rationale"]}
 C4_SCHEMA: StructuredSchema = {"type": "object", "required": ["content", "excerpt_policy"]}
+C5_SCHEMA: StructuredSchema = {"type": "object", "required": ["summary_markdown"]}
 C6_SCHEMA: StructuredSchema = {"type": "object", "required": ["segments"]}
 
 
@@ -114,6 +116,17 @@ def validate_c4_response(payload: StructuredPayload, response: StructuredRespons
         raise CallValidationError("C4 content is required")
     if _string(response, "excerpt_policy") != "keep_both":
         raise CallValidationError("C4 excerpt_policy must be keep_both")
+    return response
+
+
+def validate_c5_response(payload: StructuredPayload, response: StructuredResponse) -> StructuredResponse:
+    summary = _string(response, "summary_markdown").strip()
+    max_words = int(payload.get("max_words") or 300)
+    if not summary:
+        raise CallValidationError("C5 summary_markdown is required")
+    if len(summary.split()) > max_words:
+        raise CallValidationError(f"C5 summary must be at most {max_words} words")
+    response["summary_markdown"] = summary
     return response
 
 

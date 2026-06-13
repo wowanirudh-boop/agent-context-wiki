@@ -161,7 +161,7 @@ def test_fr_block_04_generated_section_marker_replaces_only_that_section() -> No
 
     assert serialize_page(page) == (
         "# Refunds\n\n"
-        "## Source Coverage\n\n"
+        "## Source Coverage\n"
         f"<!-- acw:generated Source Coverage run=run_test {GENERATED_DASH} manual edits will be overwritten -->\n"
         "- docs/source.md: 1 of 1\n\n"
         "## Related Pages\n\n"

@@ -6,6 +6,9 @@ from datetime import date
 
 from mcp.server.fastmcp import FastMCP, Context
 
+from core.blocks.model import BlockSegment, Page, ProseSegment
+from core.blocks.parser import BlockParseError, parse_page
+from core.blocks.serializer import BlockSerializationError, serialize_page
 from vaultfs import VaultFS
 from vaultfs.base import DuplicateDocumentError
 from .helpers import deep_link, resolve_path
@@ -16,6 +19,7 @@ _FILE_EXT_RE = re.compile(r"\.(md|txt|svg|csv|json|xml|html)$", re.IGNORECASE)
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.+?\n)---[ \t]*\n", re.DOTALL)
 _FOOTNOTE_DEF_RE = re.compile(r"^\[\^([^\]]+)\]:", re.MULTILINE)
 _CONTEXT_LINES = 5
+_CONTEXT_BLOCK_PREFIX = "<!-- cb {"
 
 
 def _parse_frontmatter(content: str) -> dict:
@@ -171,6 +175,16 @@ class WriteHandler:
                 f"Error: `{dir_path}{filename}` already exists. "
                 f"Use the `edit` tool to modify it, or pass `overwrite=true` to replace it entirely."
             )
+        if _has_context_blocks(content):
+            normalized, error = _normalize_context_block_markdown(content)
+            if error:
+                return error
+            content = normalized
+        if existing and overwrite and _has_context_blocks(existing.get("content") or ""):
+            preserved, error = _context_overwrite_preserves_blocks(existing.get("content") or "", content)
+            if error:
+                return error
+            content = preserved
 
         if not self.fs.write_to_disk(dir_path, filename, content):
             return f"Error: invalid path `{dir_path.lstrip('/') + filename}`"
@@ -234,11 +248,16 @@ class WriteHandler:
 
         content = doc.get("content") or doc.get("content", "") or ""
         error = self._validate_single_match(content, old_text)
-        if error:
-            return error
-
-        replace_start = content.index(old_text)
-        new_content = content.replace(old_text, new_text, 1)
+        if _has_context_blocks(content):
+            routed, route_error, replace_start = _edit_context_block_markdown(content, old_text, new_text)
+            if route_error:
+                return route_error
+            new_content = routed
+        else:
+            if error:
+                return error
+            replace_start = content.index(old_text)
+            new_content = content.replace(old_text, new_text, 1)
 
         self.fs.write_to_disk(dir_path, filename, new_content)
         meta = _parse_frontmatter(new_content)
@@ -265,7 +284,13 @@ class WriteHandler:
         if not doc:
             return f"Document '{path}' not found."
 
-        new_content = _append_markdown_section(doc.get("content") or "", content)
+        existing = doc.get("content") or ""
+        if _has_context_blocks(existing):
+            new_content, error = _append_context_block_markdown(existing, content)
+            if error:
+                return error
+        else:
+            new_content = _append_markdown_section(existing, content)
 
         self.fs.write_to_disk(dir_path, filename, new_content)
         meta = _parse_frontmatter(new_content)
@@ -398,6 +423,85 @@ class WriteHandler:
                 return i
             char_count += len(line) + 1
         return len(lines) - 1
+
+
+def _has_context_blocks(content: str) -> bool:
+    return _CONTEXT_BLOCK_PREFIX in content
+
+
+def _normalize_context_block_markdown(content: str) -> tuple[str, str | None]:
+    try:
+        return serialize_page(parse_page(content)), None
+    except (BlockParseError, BlockSerializationError, ValueError) as exc:
+        return "", f"Error: context block page is malformed: {exc}"
+
+
+def _context_overwrite_preserves_blocks(existing: str, proposed: str) -> tuple[str, str | None]:
+    normalized, error = _normalize_context_block_markdown(proposed)
+    if error:
+        return "", error
+    existing_ids = {block.id for block in parse_page(existing).blocks}
+    proposed_ids = {block.id for block in parse_page(normalized).blocks}
+    if not existing_ids <= proposed_ids:
+        return "", "Error: overwrite would remove existing context blocks; use edit or append for prose changes."
+    return normalized, None
+
+
+def _edit_context_block_markdown(content: str, old_text: str, new_text: str) -> tuple[str, str | None, int]:
+    try:
+        page = parse_page(content)
+    except BlockParseError as exc:
+        return "", f"Error: context block page is malformed: {exc}", 0
+
+    matches = [
+        (index, segment.text.find(old_text))
+        for index, segment in enumerate(page.segments)
+        if isinstance(segment, ProseSegment) and old_text in segment.text
+    ]
+    total = sum(segment.text.count(old_text) for segment in page.segments if isinstance(segment, ProseSegment))
+    if total == 0:
+        if old_text in content:
+            return "", "Error: old_text matches inside a context block; direct context block edits are not supported.", 0
+        return "", "Error: no match found for old_text.", 0
+    if total > 1:
+        return "", f"Error: found {total} matches for old_text. Provide more context to match exactly once.", 0
+
+    segment_index, offset = matches[0]
+    updated_segments = list(page.segments)
+    segment = updated_segments[segment_index]
+    if not isinstance(segment, ProseSegment):
+        return "", "Error: old_text matches inside a context block; direct context block edits are not supported.", 0
+    updated_segments[segment_index] = ProseSegment(segment.text.replace(old_text, new_text, 1))
+    updated = Page(updated_segments)
+    try:
+        return serialize_page(updated), None, _offset_in_page(page, segment_index, offset)
+    except (BlockParseError, BlockSerializationError, ValueError) as exc:
+        return "", f"Error: replacement would create malformed context block markdown: {exc}", 0
+
+
+def _append_context_block_markdown(existing: str, addition: str) -> tuple[str, str | None]:
+    try:
+        page = parse_page(existing)
+    except BlockParseError as exc:
+        return "", f"Error: context block page is malformed: {exc}"
+    prefix = "" if not existing.strip() else ("\n\n" if not existing.endswith("\n\n") else "")
+    updated = Page([*page.segments, ProseSegment(prefix + addition.strip("\n") + "\n")])
+    try:
+        return serialize_page(updated), None
+    except (BlockParseError, BlockSerializationError, ValueError) as exc:
+        return "", f"Error: appended content would create malformed context block markdown: {exc}"
+
+
+def _offset_in_page(page: Page, target_index: int, offset: int) -> int:
+    total = 0
+    for index, segment in enumerate(page.segments):
+        if index == target_index:
+            return total + offset
+        if isinstance(segment, ProseSegment):
+            total += len(segment.text)
+        elif isinstance(segment, BlockSegment):
+            total += len(serialize_page(Page([segment])))
+    return total
 
 
 def register(mcp: FastMCP, get_user_id, fs_factory) -> None:

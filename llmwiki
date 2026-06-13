@@ -10,6 +10,7 @@ Usage:
     llmwiki reindex <workspace>      Force full rebuild of index.db
     llmwiki process <workspace>      Run the v2 placement pipeline
     llmwiki apply-decisions <workspace> [review_file]
+    llmwiki coverage <workspace> [source]
     llmwiki hard-delete <workspace> --block-id <block_id>
 """
 
@@ -321,6 +322,26 @@ def cmd_apply_decisions(workspace: str, review_file: str | None = None) -> None:
     print(f"  committed: {result.committed}")
 
 
+def cmd_coverage(workspace: str, source: str | None = None) -> None:
+    ws = Path(workspace).resolve()
+    db_path = ws / ".llmwiki" / "index.db"
+    if not db_path.exists():
+        print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
+        sys.exit(1)
+    _apply_acw_migrations(ws)
+
+    import aiosqlite
+
+    from core.coverage import coverage_report_markdown
+
+    async def _run() -> str:
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            return await coverage_report_markdown(ws, db, source=source)
+
+    print(asyncio.run(_run()), end="")
+
+
 def cmd_hard_delete(workspace: str, *, block_id: str) -> None:
     ws = Path(workspace).resolve()
     db_path = ws / ".llmwiki" / "index.db"
@@ -385,6 +406,10 @@ def main():
     p_apply.add_argument("workspace", help="Path to workspace folder")
     p_apply.add_argument("review_file", nargs="?", help="Review file path; defaults to unresolved review files")
 
+    p_coverage = sub.add_parser("coverage", help="Print ledger-derived Source Coverage")
+    p_coverage.add_argument("workspace", help="Path to workspace folder")
+    p_coverage.add_argument("source", nargs="?", help="Optional source path, filename, or id")
+
     p_hard_delete = sub.add_parser("hard-delete", help="Explicitly hard-delete a v2 context block")
     p_hard_delete.add_argument("workspace", help="Path to workspace folder")
     p_hard_delete.add_argument("--block-id", required=True, help="Context block id to hard-delete")
@@ -411,6 +436,8 @@ def main():
         cmd_process(args.workspace)
     elif args.command == "apply-decisions":
         cmd_apply_decisions(args.workspace, getattr(args, "review_file", None))
+    elif args.command == "coverage":
+        cmd_coverage(args.workspace, getattr(args, "source", None))
     elif args.command == "hard-delete":
         cmd_hard_delete(args.workspace, block_id=args.block_id)
 

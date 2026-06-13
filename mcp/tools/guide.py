@@ -12,6 +12,19 @@ You are connected to an **LLM Wiki** — a personal knowledge workspace where yo
 2. **Compiled Wiki** (path: `/wiki/`) — markdown pages YOU create and maintain. You own this layer.
 3. **Tools** — `search`, `read`, `create`, `edit`, `append`, `delete` — your interface to both layers.
 
+## Agent Context Wiki v2 Read Tier
+
+For agent-consumable context, use the bounded two-tier read pattern:
+1. Call `wiki_index()` to see active pages grouped by domain.
+2. Call `wiki_summary(page)` for candidate pages; summaries are derived and do not guarantee coverage.
+3. Call `wiki_page(page)` only for pages that need full source-backed evidence and block metadata.
+4. Use `wiki_search(query, tier="summary")` first; switch to `tier="full"` when you need block evidence.
+
+Block status semantics matter. `current` blocks are the default evidence for building and testing.
+`conflicted` and `needs_review` blocks are visible by default so you notice unresolved risk.
+Pass `statuses=["*"]` to `wiki_page` when you need historical `deprecated` context or every
+status still present in page markdown. `wiki_coverage(source)` shows ledger-derived source coverage.
+
 ## Reading Images
 
 The `read` tool can return native MCP image blocks. Use `include_images=true` when visual content matters:

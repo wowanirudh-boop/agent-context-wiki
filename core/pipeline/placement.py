@@ -52,6 +52,7 @@ class PlacementWriter:
         self.provider = provider
         self.page_writes = 0
         self.blocks_created = 0
+        self._new_page_cache: dict[str, Row] = {}
 
     async def page_context_payload(self) -> dict[str, dict[str, list[str]]]:
         context: dict[str, dict[str, list[str]]] = {}
@@ -131,7 +132,11 @@ class PlacementWriter:
             return PlacementOutcome(kind="conflicted_pending", review_row_id=str(row["id"]))
 
         await self._insert_clean_block(page, str(placement["section"]), block)
-        await self.ledger.mark_placed(str(chunk["id"]), block_ids=[block.id])
+        current_chunk = await self.dao.get_chunk(str(chunk["id"]))
+        if current_chunk is not None and current_chunk["disposition"] == "placed":
+            await self.dao.link_block_chunk(block.id, str(chunk["id"]))
+        else:
+            await self.ledger.mark_placed(str(chunk["id"]), block_ids=[block.id])
         return PlacementOutcome(kind="placed", block_id=block.id)
 
     async def _resolve_page(self, placement: Mapping[str, Any]) -> Row:
@@ -145,13 +150,18 @@ class PlacementWriter:
         new_page = placement.get("new_page")
         if not isinstance(new_page, Mapping):
             raise ValueError("placement requires page or new_page")
+        cache_key = str(new_page["path_slug"])
+        if cache_key in self._new_page_cache:
+            return self._new_page_cache[cache_key]
         path = _unique_page_path(await self.registry.list_pages(), str(new_page["path_slug"]))
-        return await self.registry.create_page(
+        page = await self.registry.create_page(
             title=str(new_page["title"]),
             path=path,
             description=str(new_page["description"]),
             domain=str(new_page["domain"]),
         )
+        self._new_page_cache[cache_key] = page
+        return page
 
     async def _insert_clean_block(self, page_row: Row, section: str, block: ContextBlock) -> None:
         path = self.workspace / page_row["path"]

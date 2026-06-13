@@ -98,6 +98,9 @@ def _rule_based_placement(payload: StructuredPayload) -> StructuredResponse:
 def _placement_for_chunk(chunk: Mapping[str, Any], payload: StructuredPayload) -> Mapping[str, Any]:
     chunk_id = str(chunk.get("id") or chunk.get("chunk_id") or "")
     text = str(chunk.get("text", ""))
+    node = _node_settings_response(chunk, payload)
+    if node is not None:
+        return node
     excerpt = _excerpt(text)
     if not excerpt:
         return {"chunk_id": chunk_id, "relevant": False, "irrelevant_reason": "empty chunk", "placements": []}
@@ -140,6 +143,82 @@ def _placement_for_chunk(chunk: Mapping[str, Any], payload: StructuredPayload) -
             }
         ],
     }
+
+
+def _node_settings_response(chunk: Mapping[str, Any], payload: StructuredPayload) -> Mapping[str, Any] | None:
+    source_path = str(chunk.get("source_path", "")).replace("\\", "/")
+    text = str(chunk.get("text", ""))
+    if "docs/nodes/" not in source_path or "| Setting |" not in text:
+        return None
+    rows = _table_setting_rows(text)
+    if not rows:
+        return None
+    title = _node_title(source_path, text)
+    page_ref = _exact_title_page(title, payload)
+    node_key = _node_key_segment(source_path)
+    if page_ref is None:
+        page = None
+        new_page = {
+            "title": title,
+            "description": f"{title} settings and defaults",
+            "domain": "nodes",
+            "path_slug": title.lower().replace(" ", "-"),
+            "no_registry_match_assertion": "Node reference pages are one page per node source file.",
+        }
+    else:
+        page = {"existing_page_id": page_ref}
+        new_page = None
+    placements = []
+    for setting, default, notes, raw_line in rows:
+        setting_key = re.sub(r"[^a-z0-9_]+", "_", setting.lower()).strip("_")
+        placements.append(
+            {
+                "page": page,
+                "new_page": new_page,
+                "section": "API Details" if node_key == "api_call" else "Rules",
+                "block": {
+                    "key": f"nodes.{node_key}.{setting_key}",
+                    "type": "api" if node_key == "api_call" else "rule",
+                    "content": f"**{setting}:** `{default}`. {notes}",
+                    "excerpt": raw_line,
+                    "new_key_justification": "Each node setting receives a stable setting key.",
+                },
+                "links": [],
+            }
+        )
+    return {"chunk_id": str(chunk.get("id") or chunk.get("chunk_id") or ""), "relevant": True, "irrelevant_reason": None, "placements": placements}
+
+
+def _table_setting_rows(text: str) -> list[tuple[str, str, str, str]]:
+    rows = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or "---" in stripped or "Setting" in stripped:
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        rows.append((cells[0], cells[1], cells[2], stripped))
+    return rows
+
+
+def _node_title(source_path: str, text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return source_path.rsplit("/", 1)[-1].rsplit(".", 1)[0].replace("_", " ").title()
+
+
+def _node_key_segment(source_path: str) -> str:
+    stem = source_path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
+    return re.sub(r"[^a-z0-9_]+", "_", stem).strip("_")
+
+
+def _exact_title_page(title: str, payload: StructuredPayload) -> str | None:
+    for page in _as_list(payload.get("registry", [])):
+        if isinstance(page, Mapping) and str(page.get("title", "")).casefold() == title.casefold():
+            return str(page.get("id"))
+    return None
 
 
 def _best_page(text: str, payload: StructuredPayload) -> Mapping[str, Any] | None:

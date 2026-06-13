@@ -11,6 +11,8 @@ from core.blocks.model import BlockSegment, ContextBlock, Page
 from core.blocks.mutations import insert_block, remove_pending_marker, set_generated_section, set_status
 from core.blocks.parser import parse_page
 from core.blocks.serializer import write_page
+from core.config import load_config
+from core.coverage import render_coverage_sections
 from core.db.dao import ACWDao, Row, json_dumps, utc_now
 from core.db.migrate import apply_migrations
 from core.gitops import commit_apply_decisions, ensure_wiki_repo
@@ -21,6 +23,7 @@ from core.llm.provider import LLMProvider, provider_from_config
 from core.models import BlockStatus, EventKind, ReviewDecision, ReviewRowKind, RunStatus
 from core.registry import PageRegistry
 from core.review.parse import ParsedReviewFile, ParsedReviewRow, parse_review_file
+from core.summary import render_summaries_and_index
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +78,8 @@ async def apply_decisions(
             result = await apply_review_file(ws, db, path, provider=llm)
             applied += result.applied_rows
             follow_ups += result.follow_up_rows
+        await render_coverage_sections(ws, db, run_id="apply-decisions")
+        await render_summaries_and_index(ws, db, run_id="apply-decisions", provider=llm, config=load_config(ws))
         await ChunkLedger(dao).export_json(ws, run_id="apply-decisions")
         await PageRegistry(dao).export_json(ws)
     commit = commit_apply_decisions(ws, [path.name for path in paths])

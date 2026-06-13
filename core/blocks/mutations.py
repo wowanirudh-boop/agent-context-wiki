@@ -94,7 +94,7 @@ def set_generated_section(page: Page, section: str, body: str, *, run_id: str) -
     _validate_section(section)
     headings = _find_headings(page)
     existing = _heading_by_name(headings, section)
-    replacement = f"\n{generated_section_marker(section, run_id)}\n{body}\n\n"
+    replacement = f"{generated_section_marker(section, run_id)}\n{body}\n\n"
     if existing is None:
         position = _new_section_position(page, headings, section)
         heading_text = _prefix_for_insert(page, position) + f"## {section}\n"

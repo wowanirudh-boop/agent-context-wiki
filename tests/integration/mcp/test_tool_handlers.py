@@ -157,6 +157,46 @@ class TestWriteReadFlow:
         assert "metadata-tags.md" in await searcher.list_documents("*", ["frontmatter-tag"])
         assert "metadata-tags.md" not in await searcher.list_documents("*", ["arg-tag"])
 
+    async def test_fr_block_04_m7_edit_context_block_page_routes_through_serializer(self, fs):
+        instance, kb_id = fs
+        from core.blocks.parser import parse_page
+        from core.blocks.serializer import serialize_block
+        from core.blocks.model import ContextBlock
+        from core.models import BlockStatus, BlockType
+        from tools.write import WriteHandler
+        from tools.read import ReadHandler
+
+        kb = _make_kb(kb_id)
+        writer = WriteHandler(instance, kb)
+        reader = ReadHandler(instance, kb)
+        block = ContextBlock(
+            id="cb_write",
+            key="refunds.window_days",
+            type=BlockType.rule,
+            status=BlockStatus.current,
+            source_path="docs/source.md",
+            source_date="2026-06-01",
+            chunk_ids=["ch_write"],
+            user_edited=False,
+            content="Refunds use a 30 day window.",
+            excerpt='"Refunds use a 30 day window."',
+        )
+        content = "# Block Page\n\nIntro prose.\n\n## Rules\n\n" + serialize_block(block) + "\n"
+        await writer.create("/wiki/", "Block Page", content, ["wiki"], "", False)
+
+        result = await writer.edit("wiki/block-page.md", "Intro prose.", "Updated prose.")
+        updated = await reader.read("wiki/block-page.md", "", None, False)
+
+        assert "Replaced 1 occurrence" in result
+        assert "Updated prose." in updated
+        assert parse_page(updated).blocks[0].id == "cb_write"
+
+        rejected = await writer.edit("wiki/block-page.md", "<!-- /cb cb_write -->", "<!-- /cb broken -->")
+        unchanged = await reader.read("wiki/block-page.md", "", None, False)
+
+        assert "context block" in rejected.lower()
+        assert parse_page(unchanged).blocks[0].id == "cb_write"
+
     async def test_append_adds_content(self, fs):
         instance, kb_id = fs
         from tools.write import WriteHandler
