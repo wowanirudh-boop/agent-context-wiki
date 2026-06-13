@@ -1,0 +1,18 @@
+- question: What did the 2024 guidance say about webhook retries?
+  expected_keys: [support.webhook.retry_count]
+  expected_substrings: ["twice"]
+- question: What retry count did RCA-2026-014 require?
+  expected_keys: [support.webhook.retry_count]
+  expected_substrings: ["5 times"]
+- question: What should happen after a provider mismatch?
+  expected_keys: [support.provider_mismatch.escalation]
+  expected_substrings: ["first confirmed"]
+- question: Which ticket used stale guidance?
+  expected_keys: [support.ticket.stale_guidance]
+  expected_substrings: ["T-1001"]
+- question: Which transcript decision was superseded?
+  expected_keys: [support.transcript.supersession]
+  expected_substrings: ["keep webhook retries at 2"]
+- question: What incident date appears in the RCA?
+  expected_keys: [support.rca.incident_date]
+  expected_substrings: ["2026-04-28"]

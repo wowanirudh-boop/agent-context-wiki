@@ -1,0 +1,18 @@
+- question: What is the refund request window?
+  expected_keys: [refunds.window_days]
+  expected_substrings: ["30 days"]
+- question: How many provider retries are allowed by terms?
+  expected_keys: [refunds.retry_count]
+  expected_substrings: ["3 times"]
+- question: Which API setting conflicts with terms?
+  expected_keys: [refunds.max_retries]
+  expected_substrings: ["maxRetries: 2"]
+- question: What happens after refund approval?
+  expected_keys: [refunds.approval_notification]
+  expected_substrings: ["approval notification"]
+- question: What happens after refund rejection?
+  expected_keys: [refunds.rejection_notification]
+  expected_substrings: ["rejection notification"]
+- question: Which requirement covers escalation?
+  expected_keys: [refunds.provider_escalation]
+  expected_substrings: ["retry exhaustion"]

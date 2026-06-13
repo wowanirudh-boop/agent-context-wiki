@@ -1,0 +1,32 @@
+nodes:
+  - id: start
+    label: Customer requests refund
+  - id: check_window
+    label: Check purchase age
+  - id: check_condition
+    label: Confirm item condition
+  - id: approve
+    label: Approve refund
+  - id: reject
+    label: Reject refund
+  - id: notify
+    label: Notify customer
+edges:
+  - from: start
+    to: check_window
+  - from: check_window
+    to: check_condition
+    condition: within 30 days
+  - from: check_window
+    to: reject
+    condition: older than 30 days
+  - from: check_condition
+    to: approve
+    condition: item unused
+  - from: check_condition
+    to: reject
+    condition: item damaged
+  - from: approve
+    to: notify
+  - from: reject
+    to: notify

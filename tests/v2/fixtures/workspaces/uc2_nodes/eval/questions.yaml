@@ -1,0 +1,18 @@
+- question: What is the default API call timeout?
+  expected_keys: [nodes.api_call.default_timeout]
+  expected_substrings: ["30s"]
+- question: What timeout does the v2 overlay set?
+  expected_keys: [nodes.api_call.default_timeout]
+  expected_substrings: ["45s"]
+- question: What expression language do condition nodes use?
+  expected_keys: [nodes.condition.expression_language]
+  expected_substrings: ["cel"]
+- question: How many passages does knowledge lookup retrieve?
+  expected_keys: [nodes.knowledge_lookup.top_k]
+  expected_substrings: ["5"]
+- question: What queue does handoff use by default?
+  expected_keys: [nodes.handoff.queue]
+  expected_substrings: ["support"]
+- question: What is the wait node maximum duration?
+  expected_keys: [nodes.wait.max_duration]
+  expected_substrings: ["7d"]

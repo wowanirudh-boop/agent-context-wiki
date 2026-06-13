@@ -1,0 +1,4 @@
+2026-05-02 09:00 Priya: Morning chatter about calendars and lunch.
+2026-05-02 09:04 Dev: Decision: keep webhook retries at 2 until the RCA is reviewed.
+2026-05-02 09:11 Priya: Decision update: supersede the earlier retry decision; use 5 webhook retries for checkout.
+2026-05-02 09:20 Sam: Note: provider mismatch should escalate after the first confirmed case.
