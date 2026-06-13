@@ -25,6 +25,7 @@ from core.pipeline.flows import extract_flow_mermaid
 from core.pipeline.placement import PlacementWriter, placement_registry_payload
 from core.pipeline.transcripts import apply_transcript_prepass, resolve_transcript_duplicate_placeholders
 from core.registry import PageRegistry
+from core.review.emit import create_taxonomy_merge_review_rows, emit_review_file, find_unresolved_review_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +53,19 @@ async def run_processing_run(
         llm = provider or provider_from_config(ws, dao=dao)
         ledger = ChunkLedger(dao, max_attempts=cfg.max_attempts)
         registry = PageRegistry(dao)
-        writer = PlacementWriter(ws, db, ledger, registry)
-        stats: dict[str, Any] = {"placed": 0, "irrelevant": 0, "failed": 0, "llm_calls": 0, "page_writes": 0}
+        writer = PlacementWriter(ws, db, ledger, registry, run_id=run_id, provider=llm)
+        unresolved_reviews = find_unresolved_review_files(ws)
+        stats: dict[str, Any] = {
+            "placed": 0,
+            "duplicate": 0,
+            "conflicted_pending": 0,
+            "irrelevant": 0,
+            "failed": 0,
+            "llm_calls": 0,
+            "page_writes": 0,
+            "unresolved_reviews": len(unresolved_reviews),
+            "unresolved_review_files": unresolved_reviews,
+        }
         calls_before = _provider_call_count(llm)
         try:
             await _mark_out_of_scope_chunks(db, ledger)
@@ -63,11 +75,17 @@ async def run_processing_run(
                     await ledger.mark_pending_for_retry(str(chunk["id"]))
 
             worklist = await _worklist(db, max_attempts=cfg.max_attempts)
+            had_work = bool(worklist)
             for batch in batch_chunks_by_source(worklist, max_chunks=cfg.batch_max_chunks):
                 processed = await _process_batch(db, ledger, registry, writer, llm, batch, ws)
                 for key, value in processed.items():
                     stats[key] = int(stats.get(key, 0)) + value
 
+            if had_work:
+                await create_taxonomy_merge_review_rows(db, run_id)
+                review_path = await emit_review_file(ws, db, run_id)
+                if review_path is not None:
+                    stats["review_file"] = review_path.relative_to(ws).as_posix()
             pending = await _pending_count(db)
             stats["pending"] = pending
             stats["page_writes"] = writer.page_writes
@@ -105,7 +123,7 @@ async def _process_batch(
     if all(chunk["source_kind"] == "transcript" for chunk in batch):
         batch = await _preprocess_transcript_batch(db, ledger, provider, batch)
         if not batch:
-            return {"irrelevant": 0, "placed": 0, "failed": 0}
+            return {"irrelevant": 0, "placed": 0, "duplicate": 0, "conflicted_pending": 0, "failed": 0}
 
     if all(chunk["source_kind"] == "flow" for chunk in batch):
         return await _process_flow_batch(ledger, writer, provider, batch)
@@ -117,7 +135,7 @@ async def _process_batch(
         "page_context": await writer.page_context_payload(),
     }
     response = await complete_validated(provider, "C1", payload, C1_SCHEMA, validate_c1_response)
-    counts = {"placed": 0, "irrelevant": 0, "failed": 0}
+    counts = {"placed": 0, "duplicate": 0, "conflicted_pending": 0, "irrelevant": 0, "failed": 0}
     by_id = {str(chunk["id"]): chunk for chunk in batch}
     for item in response["chunks"]:
         chunk = by_id[str(item["chunk_id"])]
@@ -126,16 +144,19 @@ async def _process_batch(
             counts["irrelevant"] += 1
             continue
         try:
-            block_ids: list[str] = []
             for placement in item["placements"]:
-                block_id = await writer.write_candidate(
+                outcome = await writer.write_candidate(
                     chunk,
                     placement,
                     default_transcript_type=chunk["source_kind"] == "transcript",
                 )
-                await resolve_transcript_duplicate_placeholders(db, survivor_chunk_id=str(chunk["id"]), block_id=block_id)
-                block_ids.append(block_id)
-            counts["placed"] += len(block_ids)
+                counts[outcome.kind] += 1
+                if outcome.kind == "placed" and outcome.block_id is not None:
+                    await resolve_transcript_duplicate_placeholders(
+                        db,
+                        survivor_chunk_id=str(chunk["id"]),
+                        block_id=outcome.block_id,
+                    )
         except (CallValidationError, KeyError, RuntimeError, ValueError) as exc:
             await ledger.mark_failed(str(chunk["id"]), reason=str(exc))
             counts["failed"] += 1
@@ -159,7 +180,7 @@ async def _process_flow_batch(
     provider: LLMProvider,
     batch: list[Row],
 ) -> dict[str, int]:
-    counts = {"placed": 0, "irrelevant": 0, "failed": 0}
+    counts = {"placed": 0, "duplicate": 0, "conflicted_pending": 0, "irrelevant": 0, "failed": 0}
     for chunk in batch:
         try:
             mermaid = await extract_flow_mermaid(provider, str(chunk["text"]), source_path=str(chunk["source_path"]))
@@ -182,8 +203,8 @@ async def _process_flow_batch(
                 },
                 "links": [],
             }
-            await writer.write_candidate(chunk, placement)
-            counts["placed"] += 1
+            outcome = await writer.write_candidate(chunk, placement)
+            counts[outcome.kind] += 1
         except (CallValidationError, ValueError) as exc:
             await ledger.mark_failed(str(chunk["id"]), reason=str(exc))
             counts["failed"] += 1

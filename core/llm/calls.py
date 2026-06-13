@@ -7,14 +7,16 @@ from typing import Any
 from core.blocks.keys import SemanticKeyError, validate_semantic_key
 from core.blocks.model import CANONICAL_SECTIONS
 from core.llm.provider import LLMProvider, StructuredPayload, StructuredResponse, StructuredSchema
-from core.models import BlockType
+from core.models import BlockType, ConflictType, ReviewDecision
 
 C1_PLACEMENT_TEMPLATE = "Classify and place source chunks into source-backed context blocks."
 C2_FLOW_TEMPLATE = "Convert a structured flow definition into Mermaid while preserving nodes and edges."
+C3_CONFLICT_TEMPLATE = "Judge whether a candidate context block duplicates or conflicts with an existing block."
 C6_TRANSCRIPT_TEMPLATE = "Classify transcript segments and mark intra-transcript supersession."
 
 C1_SCHEMA: StructuredSchema = {"type": "object", "required": ["chunks"]}
 C2_SCHEMA: StructuredSchema = {"type": "object", "required": ["mermaid", "nodes", "edges"]}
+C3_SCHEMA: StructuredSchema = {"type": "object", "required": ["verdict", "conflict_type", "recommendation", "rationale"]}
 C6_SCHEMA: StructuredSchema = {"type": "object", "required": ["segments"]}
 
 
@@ -82,6 +84,25 @@ def validate_c2_response(payload: StructuredPayload, response: StructuredRespons
         condition = edge.get("condition")
         if condition is not None and not isinstance(condition, str):
             raise CallValidationError("C2 edge condition must be a string or null")
+    return response
+
+
+def validate_c3_response(payload: StructuredPayload, response: StructuredResponse) -> StructuredResponse:
+    del payload
+    verdict = _string(response, "verdict")
+    if verdict not in {"distinct", "duplicate", "conflict"}:
+        raise CallValidationError(f"Unknown C3 verdict: {verdict}")
+    conflict_type = response.get("conflict_type")
+    if verdict == "conflict":
+        if conflict_type not in {item.value for item in ConflictType}:
+            raise CallValidationError("C3 conflict verdict requires a valid conflict_type")
+    elif conflict_type is not None:
+        raise CallValidationError("C3 non-conflict verdict requires conflict_type=null")
+    recommendation = _string(response, "recommendation")
+    if recommendation not in {item.value for item in ReviewDecision}:
+        raise CallValidationError(f"Unknown C3 recommendation: {recommendation}")
+    if not _string(response, "rationale").strip():
+        raise CallValidationError("C3 rationale is required")
     return response
 
 

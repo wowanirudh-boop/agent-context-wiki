@@ -6,7 +6,7 @@ from typing import Any
 
 import aiosqlite
 
-from core.ids import new_id
+from core.ids import new_id, review_row_id
 from core.models import EventKind, RunStatus
 
 Row = dict[str, Any]
@@ -271,6 +271,24 @@ class ACWDao:
         )
         return await fetch_all(cursor)
 
+    async def get_block(self, block_id: str) -> Row | None:
+        cursor = await self.db.execute(
+            "SELECT id, page_id, key, type, status, needs_review_reason, source_id, source_path, "
+            "source_date, content_hash, user_edited, created_at, updated_at "
+            "FROM acw_blocks WHERE id = ?",
+            (block_id,),
+        )
+        return await fetch_one(cursor)
+
+    async def list_blocks_for_page(self, page_id: str) -> list[Row]:
+        cursor = await self.db.execute(
+            "SELECT id, page_id, key, type, status, needs_review_reason, source_id, source_path, "
+            "source_date, content_hash, user_edited, created_at, updated_at "
+            "FROM acw_blocks WHERE page_id = ? ORDER BY created_at, id",
+            (page_id,),
+        )
+        return await fetch_all(cursor)
+
     async def create_run(self, *, run_id: str | None = None, started_at: str | None = None) -> Row:
         row_id = run_id or new_id("run")
         await self.db.execute(
@@ -308,6 +326,89 @@ class ACWDao:
             (run_id,),
         )
         return await fetch_one(cursor)
+
+    async def create_review_row(
+        self,
+        *,
+        run_id: str,
+        page_id: str,
+        row_kind: str,
+        recommendation: str,
+        row_id: str | None = None,
+        existing_block_id: str | None = None,
+        candidate_json: str | None = None,
+        conflict_type: str | None = None,
+        recommendation_basis: str | None = None,
+        decision: str | None = None,
+        notes: str | None = None,
+    ) -> Row:
+        resolved_row_id = row_id or review_row_id(run_id, await self.next_review_row_number(run_id))
+        await self.db.execute(
+            "INSERT INTO acw_review_rows "
+            "(id, run_id, page_id, row_kind, existing_block_id, candidate_json, conflict_type, "
+            "recommendation, recommendation_basis, decision, notes, applied_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            (
+                resolved_row_id,
+                run_id,
+                page_id,
+                row_kind,
+                existing_block_id,
+                candidate_json,
+                conflict_type,
+                recommendation,
+                recommendation_basis,
+                decision,
+                notes,
+            ),
+        )
+        await self.db.commit()
+        row = await self.get_review_row(resolved_row_id)
+        if row is None:
+            raise RuntimeError("Failed to create review row")
+        return row
+
+    async def next_review_row_number(self, run_id: str) -> int:
+        rows = await self.list_review_rows(run_id=run_id)
+        if not rows:
+            return 1
+        return max(_review_row_number(str(row["id"])) for row in rows) + 1
+
+    async def get_review_row(self, row_id: str) -> Row | None:
+        cursor = await self.db.execute(
+            "SELECT id, run_id, page_id, row_kind, existing_block_id, candidate_json, conflict_type, "
+            "recommendation, recommendation_basis, decision, notes, applied_at "
+            "FROM acw_review_rows WHERE id = ?",
+            (row_id,),
+        )
+        return await fetch_one(cursor)
+
+    async def list_review_rows(self, *, run_id: str | None = None, open_only: bool = False) -> list[Row]:
+        where = []
+        params: list[Any] = []
+        if run_id is not None:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if open_only:
+            where.append("applied_at IS NULL")
+        sql = (
+            "SELECT id, run_id, page_id, row_kind, existing_block_id, candidate_json, conflict_type, "
+            "recommendation, recommendation_basis, decision, notes, applied_at "
+            "FROM acw_review_rows"
+        )
+        if where:
+            sql = f"{sql} WHERE {' AND '.join(where)}"
+        cursor = await self.db.execute(sql, tuple(params))
+        return sorted(await fetch_all(cursor), key=lambda row: (str(row["run_id"]), _review_row_number(str(row["id"]))))
+
+    async def get_document_mtime_ns(self, source_id: str | None) -> int | None:
+        if source_id is None:
+            return None
+        cursor = await self.db.execute("SELECT mtime_ns FROM documents WHERE id = ?", (source_id,))
+        row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
 
     async def write_event(
         self,
@@ -369,3 +470,10 @@ def utc_now() -> str:
 
 def _row_to_dict(cursor: aiosqlite.Cursor, row: tuple[Any, ...]) -> Row:
     return dict(zip([description[0] for description in cursor.description], row, strict=True))
+
+
+def _review_row_number(row_id: str) -> int:
+    try:
+        return int(row_id.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return 0

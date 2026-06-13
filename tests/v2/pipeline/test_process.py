@@ -76,6 +76,48 @@ def test_fr_place_08_llmwiki_process_cli_uses_fake_rules_provider(tmp_path, monk
     assert any("<!-- cb " in path.read_text(encoding="utf-8") for path in (workspace / "wiki").glob("*.md"))
 
 
+@pytest.mark.asyncio
+async def test_fr_conf_02_fr_conf_05_uc1_retry_count_conflict_emits_review_without_overwrite(tmp_path) -> None:
+    from core.blocks.parser import parse_page
+    from core.models import Disposition
+    from core.pipeline.run import run_processing_run
+    from tests.v2.fakes.fake_llm import FakeLLM
+
+    workspace = tmp_path / "uc1_minimal"
+    shutil.copytree(FIXTURE_ROOT / "uc1_minimal", workspace)
+    module = _load_llmwiki_module()
+    await asyncio.to_thread(module.cmd_init, str(workspace))
+    await asyncio.to_thread(module.cmd_reindex, str(workspace))
+
+    result = await run_processing_run(workspace, provider=FakeLLM.rule_based())
+
+    review_files = sorted((workspace / "wiki" / "_reviews").glob("RR-*.md"))
+    assert len(review_files) == 1
+    review_text = review_files[0].read_text(encoding="utf-8")
+    assert "changed_value" in review_text
+    assert "maxRetries: 2" in review_text
+    assert "retry 3 times" in review_text or "3 times before escalation" in review_text
+
+    refund_pages = list((workspace / "wiki").glob("refunds*.md"))
+    assert len(refund_pages) == 1
+    page_text = refund_pages[0].read_text(encoding="utf-8")
+    assert "\u26a0 pending review:" in page_text
+    assert "## Open Conflicts" in page_text
+    blocks = parse_page(page_text).blocks
+    assert any(block.source_path == "docs/api.md" and block.key == "refunds.retry_count" for block in blocks)
+    assert not any(block.source_path == "docs/tnc.md" and block.key == "refunds.retry_count" for block in blocks)
+
+    db_path = workspace / ".llmwiki" / "index.db"
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("SELECT disposition, disposition_reason FROM acw_chunk_ledger")
+        rows = await cursor.fetchall()
+        assert (Disposition.conflicted_pending.value, "changed_value") in rows
+        cursor = await db.execute("SELECT COUNT(*) FROM acw_review_rows WHERE row_kind = 'conflict'")
+        assert (await cursor.fetchone())[0] == 1
+
+    assert result.stats["conflicted_pending"] == 1
+
+
 def _page_texts(workspace: Path) -> dict[str, str]:
     return {
         path.relative_to(workspace).as_posix(): path.read_text(encoding="utf-8")

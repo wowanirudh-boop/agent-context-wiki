@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiosqlite
 
@@ -13,20 +14,41 @@ from core.blocks.model import ContextBlock, Page, ProseSegment
 from core.blocks.mutations import insert_block
 from core.blocks.parser import parse_page
 from core.blocks.serializer import serialize_page, write_page
-from core.db.dao import ACWDao, Row, utc_now
+from core.conflicts.detect import detect_candidate_conflict
+from core.conflicts.markers import apply_pending_conflict_marker
+from core.db.dao import ACWDao, Row, json_dumps, utc_now
 from core.ids import new_id
 from core.ledger import ChunkLedger
+from core.llm.provider import LLMProvider
 from core.models import BlockStatus, BlockType
 from core.registry import PageRegistry
 
 
+@dataclass(frozen=True, slots=True)
+class PlacementOutcome:
+    kind: Literal["placed", "duplicate", "conflicted_pending"]
+    block_id: str | None = None
+    review_row_id: str | None = None
+
+
 class PlacementWriter:
-    def __init__(self, workspace: Path, db: aiosqlite.Connection, ledger: ChunkLedger, registry: PageRegistry) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        db: aiosqlite.Connection,
+        ledger: ChunkLedger,
+        registry: PageRegistry,
+        *,
+        run_id: str,
+        provider: LLMProvider,
+    ) -> None:
         self.workspace = workspace
         self.db = db
         self.dao = ACWDao(db)
         self.ledger = ledger
         self.registry = registry
+        self.run_id = run_id
+        self.provider = provider
         self.page_writes = 0
         self.blocks_created = 0
 
@@ -48,7 +70,7 @@ class PlacementWriter:
         placement: Mapping[str, Any],
         *,
         default_transcript_type: bool = False,
-    ) -> str:
+    ) -> PlacementOutcome:
         page = await self._resolve_page(placement)
         block_data = placement["block"]
         block_type = str(block_data["type"])
@@ -68,10 +90,43 @@ class PlacementWriter:
             excerpt=_excerpt_for_block(str(block_data["excerpt"])),
         )
 
-        # M5 seam: conflict/duplicate detection will replace this direct-write path.
+        detection = await detect_candidate_conflict(self.workspace, self.db, page, block, provider=self.provider)
+        if detection.kind == "duplicate" and detection.existing is not None:
+            await self.ledger.mark_duplicate(
+                str(chunk["id"]),
+                duplicate_of_block_id=detection.existing.block.id,
+                reason="exact_duplicate" if detection.rationale is None else detection.rationale,
+            )
+            return PlacementOutcome(kind="duplicate", block_id=detection.existing.block.id)
+        if detection.kind == "conflict" and detection.existing is not None:
+            row = await self.dao.create_review_row(
+                run_id=self.run_id,
+                page_id=str(page["id"]),
+                row_kind="conflict",
+                existing_block_id=detection.existing.block.id,
+                candidate_json=json_dumps(block.model_dump(mode="json")),
+                conflict_type=detection.conflict_type.value if detection.conflict_type is not None else None,
+                recommendation=detection.recommendation.value if detection.recommendation is not None else "needs_more_info",
+                recommendation_basis=detection.recommendation_basis,
+            )
+            await self.ledger.mark_conflicted_pending(
+                str(chunk["id"]),
+                reason=detection.conflict_type.value if detection.conflict_type is not None else "ambiguous_update",
+            )
+            await apply_pending_conflict_marker(
+                self.workspace,
+                self.db,
+                page,
+                detection.existing.block.id,
+                str(row["id"]),
+                run_id=self.run_id,
+            )
+            self.page_writes += 1
+            return PlacementOutcome(kind="conflicted_pending", review_row_id=str(row["id"]))
+
         await self._insert_clean_block(page, str(placement["section"]), block)
         await self.ledger.mark_placed(str(chunk["id"]), block_ids=[block.id])
-        return block.id
+        return PlacementOutcome(kind="placed", block_id=block.id)
 
     async def _resolve_page(self, placement: Mapping[str, Any]) -> Row:
         page_ref = placement.get("page")

@@ -80,12 +80,7 @@ def _rule_based_response(call_site: str, payload: StructuredPayload) -> Structur
     if call_site == "C2":
         return _rule_based_flow(payload)
     if call_site == "C3":
-        return {
-            "verdict": "distinct",
-            "conflict_type": None,
-            "recommendation": "needs_more_info",
-            "rationale": "Rule-based FakeLLM default.",
-        }
+        return _rule_based_conflict(payload)
     if call_site == "C4":
         return {"content": _merge_content(payload), "excerpt_policy": "keep_both"}
     if call_site == "C5":
@@ -194,6 +189,46 @@ def _rule_based_flow(payload: StructuredPayload) -> StructuredResponse:
     return {"mermaid": whimsical_json_to_mermaid(data), "nodes": nodes, "edges": edges}
 
 
+def _rule_based_conflict(payload: StructuredPayload) -> StructuredResponse:
+    candidate = payload.get("candidate", {})
+    existing = payload.get("existing", {})
+    if not isinstance(candidate, Mapping) or not isinstance(existing, Mapping):
+        return _distinct_conflict_response()
+    if candidate.get("type") == "faq" or existing.get("type") == "faq":
+        return _distinct_conflict_response()
+    candidate_text = f"{candidate.get('key', '')} {candidate.get('content', '')} {candidate.get('excerpt', '')}"
+    existing_text = f"{existing.get('key', '')} {existing.get('content', '')} {existing.get('excerpt', '')}"
+    if _has_retry_count_value(candidate_text) and _has_retry_count_value(existing_text):
+        candidate_number = _first_number(candidate_text)
+        existing_number = _first_number(existing_text)
+        if candidate_number is not None and existing_number is not None and candidate_number != existing_number:
+            basis = payload.get("recommendation_basis", {})
+            basis_name = basis.get("basis") if isinstance(basis, Mapping) else "source_date"
+            return {
+                "verdict": "conflict",
+                "conflict_type": "changed_value",
+                "recommendation": "accept_new",
+                "rationale": f"Retry count differs; recommendation basis supplied by code: {basis_name}.",
+            }
+        if candidate_number is not None and candidate_number == existing_number:
+            return {
+                "verdict": "duplicate",
+                "conflict_type": None,
+                "recommendation": "keep_existing",
+                "rationale": "Both blocks state the same retry count.",
+            }
+    return _distinct_conflict_response()
+
+
+def _distinct_conflict_response() -> StructuredResponse:
+    return {
+        "verdict": "distinct",
+        "conflict_type": None,
+        "recommendation": "needs_more_info",
+        "rationale": "Rule-based FakeLLM default.",
+    }
+
+
 def _transcript_segments(segments: list[Any]) -> list[Mapping[str, Any]]:
     decision_ids = [
         _chunk_id(segment)
@@ -240,6 +275,11 @@ def _excerpt(text: str) -> str:
     sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence.strip()]
     if not sentences:
         return text.strip()
+    lowered = text.lower()
+    if _retryish(lowered):
+        for sentence in sentences:
+            if _retryish(sentence) and _contains_digit(sentence):
+                return sentence
     for sentence in sentences:
         if _contains_digit(sentence):
             return sentence
@@ -262,16 +302,16 @@ def _domain_for_title(title: str) -> str:
 def _block_shape(text: str, source_path: str) -> tuple[str, str, str]:
     lowered = f"{source_path}\n{text}".lower()
     source_segment = _source_segment(source_path)
-    if "maxretries" in lowered:
-        return f"refunds.{source_segment}.max_retries", "api", "API Details"
-    if "retry" in lowered or "retries" in lowered:
-        return f"refunds.{source_segment}.retry_count", "rule", "Rules"
-    if "30 day" in lowered or "30 days" in lowered or "window" in lowered:
-        return f"refunds.{source_segment}.window_days", "rule", "Rules"
-    if "endpoint:" in lowered or "request fields" in lowered:
-        return f"refunds.{source_segment}.endpoint", "api", "API Details"
     if "q:" in lowered or "a:" in lowered:
         return f"refunds.{source_segment}.faq", "faq", "FAQs"
+    if "maxretries" in lowered or _has_retry_count_value(text):
+        block_type = "api" if "maxretries" in lowered else "rule"
+        section = "API Details" if "maxretries" in lowered else "Rules"
+        return "refunds.retry_count", block_type, section
+    if "30 day" in lowered or "30 days" in lowered or "window" in lowered:
+        return "refunds.window_days", "rule", "Rules"
+    if "endpoint:" in lowered or "request fields" in lowered:
+        return f"refunds.{source_segment}.endpoint", "api", "API Details"
     if "requirement" in lowered:
         return f"refunds.{source_segment}.requirement", "requirement", "Requirements"
     if "decision" in lowered:
@@ -294,8 +334,36 @@ def _contains_digit(text: str) -> bool:
     return any(character.isdigit() for character in text)
 
 
+def _retryish(text: str) -> bool:
+    lowered = text.lower()
+    return "retry" in lowered or "retries" in lowered or "maxretries" in lowered
+
+
+def _has_retry_count_value(text: str) -> bool:
+    lowered = text.lower()
+    if "maxretries" in lowered:
+        return True
+    for sentence in re.split(r"(?<=[.!?])\s+", lowered):
+        if not _retryish(sentence):
+            continue
+        if re.search(r"\b\d+\s*(?:times?|attempts?|retries?)\b", sentence):
+            return True
+        if re.search(r"\b(?:times?|attempts?|retries?)\s*(?:is|are|:)?\s*\d+\b", sentence):
+            return True
+    return False
+
+
+def _first_number(text: str) -> int | None:
+    match = re.search(r"\b\d+\b", text)
+    if match is None:
+        return None
+    return int(match.group(0))
+
+
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    stems = [word[:-1] for word in words if len(word) > 3 and word.endswith("s")]
+    return [*words, *stems]
 
 
 def _chunk_id(value: Any) -> str:

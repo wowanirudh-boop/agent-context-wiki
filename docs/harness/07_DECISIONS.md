@@ -43,3 +43,7 @@ the PRD.
   The `documents.source_kind` column is already constrained to `wiki|source|asset`, while M3
   needs the v2 classification `flow|transcript|doc`; a namespaced metadata key preserves the
   existing index behavior without widening the legacy column.
+- **2026-06-13 · M5 · Store taxonomy merge peer snapshots in `acw_review_rows.candidate_json`.**
+  The M5 schema has no second-page column for `taxonomy_merge` rows; using the existing JSON
+  payload preserves review-row identity and avoids a migration while keeping advisory rows
+  renderable.
