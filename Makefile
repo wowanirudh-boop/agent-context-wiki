@@ -15,7 +15,7 @@ endif
 
 export ACW_LLM_PROVIDER ?= fake-rules
 
-.PHONY: setup check test lint
+.PHONY: setup check test lint mcp-import-smoke
 
 setup:
 	$(PYTHON) -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required')"
@@ -30,6 +30,9 @@ setup:
 
 lint: setup
 	$(VENV_RUFF) check .
+
+mcp-import-smoke:
+	$(PYTHON) -c "import sys; sys.path.insert(0, 'mcp'); from mcp.server.fastmcp import FastMCP; from tools import register; register(FastMCP('CI import smoke'), lambda ctx: 'ci', lambda user_id: None)"
 
 test: setup
 	$(VENV_PYTEST) tests/unit -q
