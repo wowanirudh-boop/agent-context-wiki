@@ -25,4 +25,12 @@ ignore = [
 max-complexity = 12
 
 [lint.per-file-ignores]
-"tests/**" = ["B", "C90", "BLE"]
+# Legacy surfaces predate the v2 lint gate; M0 keeps them behavior-tested
+# while new v2 code is linted normally.
+"api/**" = ["E", "F", "I", "UP", "B", "SIM", "RET", "C90", "BLE"]
+"converter/**" = ["E", "F", "I", "UP", "B", "SIM", "RET", "C90", "BLE"]
+"mcp/**" = ["E", "F", "I", "UP", "B", "SIM", "RET", "C90", "BLE"]
+"tests/conftest.py" = ["B", "C90", "BLE"]
+"tests/helpers/**" = ["E", "F", "I", "UP", "B", "SIM", "RET", "C90", "BLE"]
+"tests/unit/**" = ["E", "F", "I", "UP", "B", "SIM", "RET", "C90", "BLE"]
+"tests/integration/**" = ["E", "F", "I", "UP", "B", "SIM", "RET", "C90", "BLE"]

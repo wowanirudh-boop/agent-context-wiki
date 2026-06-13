@@ -1,7 +1,10 @@
 """Unit tests for hosted-mode MCP server configuration helpers."""
 
 import os
-import sys
+
+import pytest
+
+from tests.unit.mcp._importing import isolated_mcp_imports
 
 # The `hosted` module instantiates a FastMCP() at import time, which
 # validates SUPABASE_URL/MCP_URL via Pydantic AnyHttpUrl. The top-level
@@ -11,7 +14,10 @@ import sys
 os.environ["SUPABASE_URL"] = "https://example.supabase.co"
 os.environ.setdefault("MCP_URL", "http://example.com")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "mcp"))
+@pytest.fixture(autouse=True)
+def _mcp_imports():
+    with isolated_mcp_imports():
+        yield
 
 
 class TestBuildAllowedHosts:

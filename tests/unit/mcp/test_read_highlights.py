@@ -1,13 +1,18 @@
 """Unit tests for MCP read highlight materialization."""
 
-import os
+import importlib.util
 import sys
 import types
-import importlib.util
-from pathlib import Path
 
-MCP_DIR = Path(__file__).resolve().parents[3] / "mcp"
-sys.path.insert(0, str(MCP_DIR))
+import pytest
+
+from tests.unit.mcp._importing import MCP_DIR, isolated_mcp_imports
+
+
+@pytest.fixture(autouse=True)
+def _mcp_imports():
+    with isolated_mcp_imports():
+        yield
 
 
 def _materializer():

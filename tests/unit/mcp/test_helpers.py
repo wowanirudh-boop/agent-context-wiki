@@ -1,11 +1,14 @@
 """Unit tests for MCP tool helpers and reference parsing. Pure functions, no DB."""
 
-import os
-import sys
-
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "mcp"))
+from tests.unit.mcp._importing import isolated_mcp_imports
+
+
+@pytest.fixture(autouse=True)
+def _mcp_imports():
+    with isolated_mcp_imports():
+        yield
 
 
 class TestDeepLink:
