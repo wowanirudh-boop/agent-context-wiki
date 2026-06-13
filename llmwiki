@@ -28,17 +28,6 @@ WEB_DIR = REPO_ROOT / "web"
 
 sys.path.insert(0, str(API_DIR))
 
-from domain.local_index import (  # noqa: E402
-    extension_for,
-    folder_path_for,
-    hash_file,
-    read_text_content,
-    relative_path_for,
-    source_kind_for,
-    status_for_content,
-    title_for,
-)
-
 
 def _sanitize_name(name: str) -> str:
     slug = name.lower().strip()
@@ -132,67 +121,23 @@ def cmd_init(workspace: str) -> None:
 
 def _index_existing_files(ws: Path, db_path: Path, user_id: str, ws_id: str) -> None:
     """Index existing files in the workspace into SQLite."""
-    import uuid
-    import sqlite3
-
-    ignore_dirs = {".llmwiki", ".git", "node_modules", "__pycache__", ".venv", "venv"}
-    indexed = 0
-
-    conn = sqlite3.connect(str(db_path))
-
-    # Get already-indexed paths
-    cursor = conn.execute("SELECT relative_path FROM documents")
-    existing = {row[0] for row in cursor.fetchall()}
-
-    for root_path, dirs, files in os.walk(ws):
-        # Skip ignored directories
-        dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
-
-        for filename in files:
-            if filename.startswith("."):
-                continue
-
-            full = Path(root_path) / filename
-            relative = relative_path_for(ws, full)
-
-            if relative in existing:
-                continue
-
-            ext = extension_for(filename)
-            stat = full.stat()
-
-            # Determine path (directory) and source_kind
-            dir_path = folder_path_for(relative)
-            source_kind = source_kind_for(relative)
-            title = title_for(filename)
-
-            # Read content for text files
-            content = read_text_content(full, ext)
-
-            doc_id = str(uuid.uuid4())
-            content_hash = hash_file(full)
-            status = status_for_content(content)
-
-            try:
-                conn.execute(
-                    "INSERT INTO documents (id, user_id, filename, title, path, relative_path, "
-                    "source_kind, file_type, file_size, status, content, tags, version, "
-                    "content_hash, mtime_ns, last_indexed_at, document_number) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 0, ?, ?, datetime('now'), "
-                    "(SELECT COALESCE(MAX(document_number), 0) + 1 FROM documents))",
-                    (doc_id, user_id, filename, title, dir_path, relative,
-                     source_kind, ext or "bin", stat.st_size, status, content,
-                     content_hash, int(stat.st_mtime_ns)),
-                )
-                indexed += 1
-            except Exception as e:
-                print(f"  Warning: could not index {relative}: {e}", file=sys.stderr)
-
-    conn.commit()
-    conn.close()
+    indexed = asyncio.run(_index_existing_files_async(ws, db_path))
 
     if indexed > 0:
         print(f"OK Indexed {indexed} existing file(s)")
+
+
+async def _index_existing_files_async(ws: Path, db_path: Path) -> int:
+    import aiosqlite
+    from domain.watcher import scan_workspace
+
+    from core.db.migrate import apply_migrations
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA foreign_keys=ON")
+        await apply_migrations(db)
+        return await scan_workspace(db, ws, schedule_processing=False)
 
 
 def cmd_serve(workspace: str, open_browser: bool = True) -> None:
@@ -209,8 +154,8 @@ def cmd_serve(workspace: str, open_browser: bool = True) -> None:
     env["API_URL"] = "http://localhost:8000"
 
     print(f"Starting LLM Wiki for: {ws}")
-    print(f"  API: http://localhost:8000")
-    print(f"  Web: http://localhost:3000")
+    print("  API: http://localhost:8000")
+    print("  Web: http://localhost:3000")
     print(f"  MCP: llmwiki mcp-config {ws}")
     print()
 
@@ -297,9 +242,9 @@ def cmd_mcp_config(workspace: str, name: str | None = None) -> None:
         }
     }
 
-    print(f"# Add to claude_desktop_config.json:")
+    print("# Add to claude_desktop_config.json:")
     print(f"# This MCP server is scoped to: {ws}")
-    print(f"# To use another workspace, add another server entry.")
+    print("# To use another workspace, add another server entry.")
     print()
     print(json.dumps(config, indent=2))
 
@@ -311,12 +256,11 @@ def cmd_reindex(workspace: str) -> None:
         print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
         sys.exit(1)
 
-    # Drop and recreate document-related tables
+    # Drop rebuildable extraction tables; keep documents so source ids remain path-stable.
     import sqlite3
     conn = sqlite3.connect(str(db_path))
     conn.execute("DELETE FROM document_chunks")
     conn.execute("DELETE FROM document_pages")
-    conn.execute("DELETE FROM documents")
     conn.commit()
 
     # Get workspace info

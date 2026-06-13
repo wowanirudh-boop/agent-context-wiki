@@ -175,6 +175,9 @@ async def _index_file(
         doc_id, old_hash, old_status, old_relative, old_path = existing
         metadata_current = old_relative == relative and old_path == dir_path
         if old_hash == content_hash and old_status == status and metadata_current:
+            if status == "ready" and content is not None:
+                from core.ingest import index_document_chunks
+                await index_document_chunks(db, doc_id, workspace, content=content)
             return  # No change
         if status == "pending":
             await _clear_extracted_rows(db, doc_id)
@@ -196,6 +199,9 @@ async def _index_file(
         )
         await db.commit()
         logger.info("Re-indexed (modified): %s", relative)
+        if status == "ready" and content is not None:
+            from core.ingest import index_document_chunks
+            await index_document_chunks(db, doc_id, workspace, content=content)
         if status == "pending":
             await _schedule_processing(db, doc_id, workspace, schedule_processing)
         return
@@ -221,6 +227,9 @@ async def _index_file(
         logger.info("Indexed (new): %s", relative)
 
     await db.commit()
+    if status == "ready" and content is not None:
+        from core.ingest import index_document_chunks
+        await index_document_chunks(db, doc_id, workspace, content=content)
     if status == "pending":
         await _schedule_processing(db, doc_id, workspace, schedule_processing)
 
@@ -232,12 +241,12 @@ async def _remove_file(db: aiosqlite.Connection, workspace: Path, file_path: Pat
     except ValueError:
         return
 
-    cursor = await db.execute(
-        "DELETE FROM documents WHERE relative_path = ?", (relative,),
-    )
-    if cursor.rowcount > 0:
-        await db.commit()
-        logger.info("Removed from index: %s", relative)
+    cursor = await db.execute("SELECT id FROM documents WHERE relative_path = ?", (relative,))
+    row = await cursor.fetchone()
+    if row:
+        from core.reingest import mark_source_deleted
+        await mark_source_deleted(db, row[0])
+        logger.info("Marked source deleted: %s", relative)
 
 
 async def scan_workspace(

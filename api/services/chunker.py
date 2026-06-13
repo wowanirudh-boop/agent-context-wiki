@@ -6,6 +6,7 @@ Tracks markdown headers to build breadcrumb context per chunk.
 
 import re
 import logging
+import hashlib
 from dataclasses import dataclass, field
 
 import asyncpg
@@ -33,6 +34,10 @@ class Chunk:
     start_char: int
     token_count: int
     header_breadcrumb: str = ""
+    content_hash: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.content_hash = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
 
 
 def chunk_text(

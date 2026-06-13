@@ -38,3 +38,8 @@ the PRD.
 ## Codex additions
 
 *(append below: date · phase · decision · rationale)*
+
+- **2026-06-13 · M3 · Store source-kind classification in `documents.metadata.acw_source_kind`.**
+  The `documents.source_kind` column is already constrained to `wiki|source|asset`, while M3
+  needs the v2 classification `flow|transcript|doc`; a namespaced metadata key preserves the
+  existing index behavior without widening the legacy column.

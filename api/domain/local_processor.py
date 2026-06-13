@@ -187,6 +187,8 @@ async def _store_page_contents(
         (full_content, num_pages, parser, doc_id),
     )
     await db.commit()
+    from core.ingest import seed_existing_document_chunks
+    await seed_existing_document_chunks(db, doc_id, workspace=None, content=full_content)
 
 
 async def _process_pdf(db: aiosqlite.Connection, doc_id: str, file_path: Path, workspace: Path) -> None:
@@ -310,6 +312,8 @@ async def _process_spreadsheet(db: aiosqlite.Connection, doc_id: str, file_path:
         (full_content, num_sheets, doc_id),
     )
     await db.commit()
+    from core.ingest import seed_existing_document_chunks
+    await seed_existing_document_chunks(db, doc_id, content=full_content)
 
 
 # ── Image / HTML processing ──────────────────────────────────────────────
@@ -346,3 +350,5 @@ async def _process_html(db: aiosqlite.Connection, doc_id: str, file_path: Path) 
         (content, doc_id),
     )
     await db.commit()
+    from core.ingest import seed_existing_document_chunks
+    await seed_existing_document_chunks(db, doc_id, content=content)

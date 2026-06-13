@@ -72,6 +72,16 @@ class ACWDao:
     ) -> Row:
         existing = await self.get_chunk_by_identity(source_id, source_version_id, content_hash, ordinal)
         if existing is not None:
+            if document_chunk_id is not None and existing["document_chunk_id"] != document_chunk_id:
+                await self.db.execute(
+                    "UPDATE acw_chunk_ledger SET document_chunk_id = ? WHERE id = ?",
+                    (document_chunk_id, existing["id"]),
+                )
+                await self.db.commit()
+                updated = await self.get_chunk(existing["id"])
+                if updated is None:
+                    raise RuntimeError("Failed to update chunk ledger row")
+                return updated
             return existing
 
         row_id = chunk_id or new_id("ch")

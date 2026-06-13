@@ -53,6 +53,8 @@ async def create_pool(db_path: str) -> aiosqlite.Connection:
     schema = _SCHEMA_PATH.read_text(encoding='utf-8')
     await db.executescript(schema)
     await db.commit()
+    from core.db.migrate import apply_migrations
+    await apply_migrations(db)
     return db
 
 
@@ -631,6 +633,8 @@ class SQLiteChunkRepository:
             ],
         )
         await self._db.commit()
+        from core.ingest import seed_existing_document_chunks
+        await seed_existing_document_chunks(self._db, doc_id)
         logger.info("Stored %d chunks for doc %s", len(chunks), doc_id[:8])
 
     async def search_fulltext(
