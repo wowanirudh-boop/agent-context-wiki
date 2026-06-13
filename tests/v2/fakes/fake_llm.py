@@ -98,6 +98,13 @@ def _rule_based_placement(payload: StructuredPayload) -> StructuredResponse:
 def _placement_for_chunk(chunk: Mapping[str, Any], payload: StructuredPayload) -> Mapping[str, Any]:
     chunk_id = str(chunk.get("id") or chunk.get("chunk_id") or "")
     text = str(chunk.get("text", ""))
+    if "synthetic scale irrelevant" in text.casefold():
+        return {
+            "chunk_id": chunk_id,
+            "relevant": False,
+            "irrelevant_reason": "synthetic scale smoke irrelevant",
+            "placements": [],
+        }
     node = _node_settings_response(chunk, payload)
     if node is not None:
         return node
@@ -296,6 +303,19 @@ def _rule_based_conflict(payload: StructuredPayload) -> StructuredResponse:
                 "recommendation": "keep_existing",
                 "rationale": "Both blocks state the same retry count.",
             }
+    if (
+        candidate.get("key") == existing.get("key")
+        and candidate.get("source_path") == existing.get("source_path")
+        and _normalize(candidate_text) != _normalize(existing_text)
+    ):
+        basis = payload.get("recommendation_basis", {})
+        basis_name = basis.get("basis") if isinstance(basis, Mapping) else "source_date"
+        return {
+            "verdict": "conflict",
+            "conflict_type": "changed_value",
+            "recommendation": "accept_new",
+            "rationale": f"Same semantic key has changed content; recommendation basis supplied by code: {basis_name}.",
+        }
     return _distinct_conflict_response()
 
 
@@ -366,6 +386,8 @@ def _excerpt(text: str) -> str:
 
 
 def _new_page_title(text: str, source_path: str) -> str:
+    if "checkout webhook" in text.lower() or "checkout" in source_path.lower():
+        return "Checkout Webhooks"
     if "refund" in text.lower() or "refund" in source_path.lower():
         return "Refunds"
     if "webhook" in text.lower() or "webhook" in source_path.lower():
@@ -381,6 +403,11 @@ def _domain_for_title(title: str) -> str:
 def _block_shape(text: str, source_path: str) -> tuple[str, str, str]:
     lowered = f"{source_path}\n{text}".lower()
     source_segment = _source_segment(source_path)
+    if "checkout webhook" in lowered or "provider mismatch" in lowered:
+        if _has_retry_count_value(text):
+            return "support.webhook.retry_count", "troubleshooting", "Troubleshooting"
+        if "provider mismatch" in lowered:
+            return "support.provider_mismatch.escalation", "troubleshooting", "Troubleshooting"
     if "q:" in lowered or "a:" in lowered:
         return f"refunds.{source_segment}.faq", "faq", "FAQs"
     if "requirement" in lowered:
@@ -429,6 +456,8 @@ def _has_retry_count_value(text: str) -> bool:
     for sentence in re.split(r"(?<=[.!?])\s+", lowered):
         if not _retryish(sentence):
             continue
+        if re.search(r"\b(?:twice|three|five)\b", sentence):
+            return True
         if re.search(r"\b\d+\s*(?:times?|attempts?|retries?)\b", sentence):
             return True
         if re.search(r"\b(?:times?|attempts?|retries?)\s*(?:is|are|:)?\s*\d+\b", sentence):
@@ -439,8 +468,15 @@ def _has_retry_count_value(text: str) -> bool:
 def _first_number(text: str) -> int | None:
     match = re.search(r"\b\d+\b", text)
     if match is None:
+        for word, number in {"twice": 2, "three": 3, "five": 5}.items():
+            if re.search(rf"\b{word}\b", text.casefold()):
+                return number
         return None
     return int(match.group(0))
+
+
+def _normalize(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().casefold()
 
 
 def _words(text: str) -> list[str]:

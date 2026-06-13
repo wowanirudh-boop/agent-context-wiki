@@ -94,11 +94,13 @@ class PlacementWriter:
 
         detection = await detect_candidate_conflict(self.workspace, self.db, page, block, provider=self.provider)
         if detection.kind == "duplicate" and detection.existing is not None:
-            await self.ledger.mark_duplicate(
-                str(chunk["id"]),
-                duplicate_of_block_id=detection.existing.block.id,
-                reason="exact_duplicate" if detection.rationale is None else detection.rationale,
-            )
+            current_chunk = await self.dao.get_chunk(str(chunk["id"]))
+            if current_chunk is not None and current_chunk["disposition"] == "pending":
+                await self.ledger.mark_duplicate(
+                    str(chunk["id"]),
+                    duplicate_of_block_id=detection.existing.block.id,
+                    reason="exact_duplicate" if detection.rationale is None else detection.rationale,
+                )
             return PlacementOutcome(kind="duplicate", block_id=detection.existing.block.id)
         if detection.kind == "conflict" and detection.existing is not None:
             recommendation = detection.recommendation.value if detection.recommendation is not None else "needs_more_info"

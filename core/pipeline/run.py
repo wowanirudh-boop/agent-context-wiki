@@ -222,9 +222,16 @@ async def _process_flow_batch(
     for chunk in batch:
         try:
             mermaid = await extract_flow_mermaid(provider, str(chunk["text"]), source_path=str(chunk["source_path"]))
+            target_page = _flow_target_page(
+                await writer.registry.list_pages(),
+                source_path=str(chunk["source_path"]),
+                source_text=str(chunk["text"]),
+            )
             placement = {
-                "page": None,
-                "new_page": {
+                "page": {"existing_page_id": target_page["id"]} if target_page is not None else None,
+                "new_page": None
+                if target_page is not None
+                else {
                     "title": _title_from_path(str(chunk["source_path"])),
                     "description": "Flow structure",
                     "domain": "flows",
@@ -338,3 +345,26 @@ def _provider_call_count(provider: LLMProvider) -> int:
         return int(provider.call_count)  # type: ignore[attr-defined]
     except AttributeError:
         return 0
+
+
+def _flow_target_page(pages: list[Row], *, source_path: str, source_text: str) -> Row | None:
+    flow_words = set(_flow_words(f"{Path(source_path).stem} {source_text}"))
+    best_page: Row | None = None
+    best_score = 0
+    for page in pages:
+        if page.get("status") != "active":
+            continue
+        page_words = set(_flow_words(f"{page['title']} {page['description']}"))
+        score = len(flow_words & page_words)
+        if score > best_score:
+            best_score = score
+            best_page = page
+    return best_page if best_score > 0 else None
+
+
+def _flow_words(value: str) -> list[str]:
+    import re
+
+    words = re.findall(r"[a-z0-9]+", value.casefold())
+    stems = [word[:-1] for word in words if len(word) > 3 and word.endswith("s")]
+    return [*words, *stems]

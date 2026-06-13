@@ -19,7 +19,7 @@ export ACW_LLM_PROVIDER ?= fake-rules
 
 setup:
 	$(PYTHON) -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required')"
-	$(PYTHON) -m venv $(VENV)
+	$(PYTHON) -c "from pathlib import Path; import subprocess, sys; p = Path(r'$(VENV_PYTHON)'); raise SystemExit(0 if p.exists() else subprocess.call([sys.executable, '-m', 'venv', r'$(VENV)']))"
 	$(VENV_PYTHON) -m pip install --upgrade pip
 	$(VENV_PYTHON) -m pip install -r api/requirements.txt
 	$(VENV_PYTHON) -m pip install -r mcp/requirements.txt

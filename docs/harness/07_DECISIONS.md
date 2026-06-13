@@ -47,3 +47,19 @@ the PRD.
   The M5 schema has no second-page column for `taxonomy_merge` rows; using the existing JSON
   payload preserves review-row identity and avoids a migration while keeping advisory rows
   renderable.
+- **2026-06-14 · M9 · Flow chunks may target an existing semantically overlapping active page before creating a new flow page.**
+  AS-UC1-1 requires one workflow page containing both prose-derived blocks and the flow block;
+  overlap on source/page words is the minimal deterministic rule that preserves the new-page
+  fallback.
+- **2026-06-14 · M9 · `nodes/<slug>` MCP read references resolve to existing node pages without changing registry paths.**
+  AS-UC2-1 names `wiki_page("nodes/api-call")`; expanding read-side candidates avoids adding
+  non-contract fields to placement `new_page` payloads.
+- **2026-06-14 · M9 · Same-key changed values in FakeLLM acceptance fixtures produce `changed_value` conflicts.**
+  The M9 scenarios need deterministic judgment for node setting updates and support RCA
+  contradictions while keeping tests hermetic and API-key free.
+- **2026-06-14 · M9 · `deprecate_existing` and same-key `accept_new` move deprecated blocks to the canonical Deprecated section.**
+  AS-UC3-1 requires old guidance to remain readable as deprecated history; the move is a parsed
+  page-model mutation, not a raw markdown rewrite.
+- **2026-06-14 · M9 · The NFR-03 synthetic scale smoke marks generated chunks irrelevant by rule.**
+  This keeps the test focused on 50-source/5,000-chunk ledger completion and failure accounting
+  instead of measuring thousands of page insertions in the acceptance gate.

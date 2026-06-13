@@ -193,6 +193,16 @@ def _page_candidates(ref: str) -> list[str]:
         candidates.append(cleaned.removeprefix("wiki/"))
     elif cleaned.endswith(".md"):
         candidates.append(f"wiki/{cleaned}")
+    if "/" in cleaned and not cleaned.startswith("wiki/"):
+        domain, slug = cleaned.split("/", 1)
+        title = slug.replace("-", " ").replace("_", " ").title()
+        candidates.extend(
+            [
+                f"{title} Node",
+                f"wiki/{slug}-node.md",
+                f"wiki/{domain}-{slug}.md",
+            ]
+        )
     return list(dict.fromkeys(candidates))
 
 

@@ -8,7 +8,13 @@ from typing import Any
 import aiosqlite
 
 from core.blocks.model import BlockSegment, ContextBlock, Page
-from core.blocks.mutations import insert_block, remove_pending_marker, set_generated_section, set_status
+from core.blocks.mutations import (
+    insert_block,
+    move_block_to_section,
+    remove_pending_marker,
+    set_generated_section,
+    set_status,
+)
 from core.blocks.parser import parse_page
 from core.blocks.serializer import write_page
 from core.config import load_config
@@ -182,6 +188,7 @@ async def _accept_new(ctx: _ReviewContext, row: Row) -> None:
     updated = page
     if existing.key == candidate.key:
         updated = set_status(updated, existing.id, BlockStatus.deprecated)
+        updated = move_block_to_section(updated, existing.id, "Deprecated")
         await _update_block_status(ctx, existing.id, BlockStatus.deprecated)
     updated = remove_pending_marker(updated, existing.id, str(row["id"]))
     updated = insert_block(updated, _section_for(candidate), candidate)
@@ -194,6 +201,7 @@ async def _deprecate_existing(ctx: _ReviewContext, row: Row) -> None:
     existing = _find_block(page, str(row["existing_block_id"]))
     candidate = _candidate_block(row)
     updated = set_status(page, existing.id, BlockStatus.deprecated)
+    updated = move_block_to_section(updated, existing.id, "Deprecated")
     updated = remove_pending_marker(updated, existing.id, str(row["id"]))
     updated = insert_block(updated, _section_for(candidate), candidate)
     await _update_block_status(ctx, existing.id, BlockStatus.deprecated)
@@ -233,6 +241,7 @@ async def _merge(ctx: _ReviewContext, row: Row, notes: str) -> None:
         validate_c4_response,
     )
     updated = set_status(page, existing.id, BlockStatus.deprecated)
+    updated = move_block_to_section(updated, existing.id, "Deprecated")
     updated = remove_pending_marker(updated, existing.id, str(row["id"]))
     await _update_block_status(ctx, existing.id, BlockStatus.deprecated)
     await _write_page(ctx, page_row, updated, old_text)
@@ -246,6 +255,7 @@ async def _apply_approved_merge(ctx: _ReviewContext, row: Row, content: str) -> 
     candidate = _candidate_block(row)
     merged = _merged_candidate(existing, candidate, content)
     updated = set_status(page, existing.id, BlockStatus.deprecated)
+    updated = move_block_to_section(updated, existing.id, "Deprecated")
     updated = remove_pending_marker(updated, existing.id, str(row["id"]))
     updated = insert_block(updated, _section_for(merged), merged)
     await _update_block_status(ctx, existing.id, BlockStatus.deprecated)

@@ -1,6 +1,8 @@
 # Troubleshooting Guidance 2024
 
-If checkout webhook delivery fails, retry the webhook twice and then ask the customer to retry checkout.
+Source date: 2024-01-01
+
+If checkout webhook delivery fails, retry the webhook twice (2 times) and then ask the customer to retry checkout.
 
 For payment status mismatch, trust the payment provider dashboard over the local cache.
 

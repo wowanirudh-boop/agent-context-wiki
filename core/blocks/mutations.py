@@ -47,6 +47,20 @@ def set_status(
     return _update_block(page, block_id, update)
 
 
+def move_block_to_section(page: Page, block_id: str, section: str) -> Page:
+    _validate_section(section)
+    block: ContextBlock | None = None
+    segments = []
+    for segment in page.segments:
+        if isinstance(segment, BlockSegment) and segment.block.id == block_id:
+            block = segment.block
+            continue
+        segments.append(segment)
+    if block is None:
+        raise KeyError(block_id)
+    return insert_block(Page(segments), section, block)
+
+
 def replace_block_content(
     page: Page,
     block_id: str,
