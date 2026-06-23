@@ -100,6 +100,12 @@ def provider_from_config(
     provider_name = config.llm_provider.strip().lower()
     if provider_name == "openai":
         return OpenAIProvider(config, dao)
+    if provider_name == "agent":
+        if workspace is None:
+            raise ValueError("ACW_LLM_PROVIDER=agent requires a workspace path")
+        from core.llm.agent_provider import AgentProvider
+
+        return AgentProvider(workspace=workspace, dao=dao)
     if provider_name == "fake-rules":
         from tests.v2.fakes.fake_llm import FakeLLM
 

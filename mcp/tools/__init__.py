@@ -14,8 +14,10 @@ def register(mcp, get_user_id, fs_factory) -> None:
     from .delete import register as register_delete
     from .lint import register as register_lint
     from .wiki_read import register as register_wiki_read
+    from .agent_bridge import register as register_agent_bridge
 
     register_guide(mcp, get_user_id, fs_factory)
+    register_agent_bridge(mcp, get_user_id, fs_factory)
     register_search(mcp, get_user_id, fs_factory)
     register_read(mcp, get_user_id, fs_factory)
     register_wiki_read(mcp, get_user_id, fs_factory)

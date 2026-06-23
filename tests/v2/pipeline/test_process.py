@@ -156,6 +156,54 @@ async def test_fr_conf_02_fr_conf_05_uc1_retry_count_conflict_emits_review_witho
 
 
 @pytest.mark.asyncio
+async def test_agent_provider_uc1_minimal_completes_when_mcp_agent_answers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.agent_bridge import AgentBridgeHandler
+
+    from core.pipeline.run import run_processing_run
+    from tests.v2.fakes.fake_llm import FakeLLM
+
+    fake_workspace = tmp_path / "uc1_fake"
+    agent_workspace = tmp_path / "uc1_agent"
+    shutil.copytree(FIXTURE_ROOT / "uc1_minimal", fake_workspace)
+    shutil.copytree(FIXTURE_ROOT / "uc1_minimal", agent_workspace)
+    module = _load_llmwiki_module()
+    await asyncio.to_thread(module.cmd_init, str(fake_workspace))
+    await asyncio.to_thread(module.cmd_reindex, str(fake_workspace))
+    await asyncio.to_thread(module.cmd_init, str(agent_workspace))
+    await asyncio.to_thread(module.cmd_reindex, str(agent_workspace))
+
+    fake_result = await run_processing_run(fake_workspace, provider=FakeLLM.rule_based())
+
+    monkeypatch.setenv("ACW_LLM_PROVIDER", "agent")
+    monkeypatch.setenv("ACW_AGENT_TIMEOUT_SECONDS", "10")
+    run_task = asyncio.create_task(run_processing_run(agent_workspace))
+    bridge = AgentBridgeHandler(agent_workspace)
+    responder = FakeLLM.rule_based()
+    try:
+        await asyncio.wait_for(_answer_agent_requests_until_done(run_task, bridge, responder), timeout=20)
+        agent_result = await run_task
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+    assert agent_result.stats["pending"] == 0
+    assert agent_result.stats["placed"] == fake_result.stats["placed"]
+    assert agent_result.stats["conflicted_pending"] == fake_result.stats["conflicted_pending"]
+    assert _ledger_disposition_counts(agent_workspace) == _ledger_disposition_counts(fake_workspace)
+    assert _block_outcomes(agent_workspace) == _block_outcomes(fake_workspace)
+    assert _active_page_paths(agent_workspace) == _active_page_paths(fake_workspace)
+    request_statuses = _request_statuses(agent_workspace)
+    assert request_statuses
+    assert set(request_statuses.values()) == {"done"}
+    assert_invariants(agent_workspace)
+
+
+@pytest.mark.asyncio
 async def test_as_uc2_1_fr_read_03_bounded_read_uses_index_summaries_then_full_pages(tmp_path) -> None:
     from tools.wiki_read import WikiReadHandler
 
@@ -231,3 +279,49 @@ def _active_page_paths(workspace: Path) -> list[str]:
 
 def _word_count(markdown: str) -> int:
     return len(markdown.split())
+
+
+async def _answer_agent_requests_until_done(run_task: asyncio.Task, bridge, responder) -> None:
+    while not run_task.done():
+        request = await bridge.acw_next_request()
+        if not request["pending"]:
+            await asyncio.sleep(0.01)
+            continue
+        response = await responder.complete_structured(
+            str(request["call_site"]),
+            request["payload"],
+            request["schema"],
+        )
+        result = await bridge.acw_answer_request(str(request["request_id"]), response)
+        assert result == {"success": True, "request_id": request["request_id"]}
+
+
+def _ledger_disposition_counts(workspace: Path) -> dict[str, int]:
+    import sqlite3
+
+    with sqlite3.connect(workspace / ".llmwiki" / "index.db") as conn:
+        return dict(
+            conn.execute(
+                "SELECT disposition, COUNT(*) FROM acw_chunk_ledger GROUP BY disposition ORDER BY disposition",
+            ).fetchall()
+        )
+
+
+def _block_outcomes(workspace: Path) -> list[tuple[str, str, str, str, int]]:
+    import sqlite3
+
+    with sqlite3.connect(workspace / ".llmwiki" / "index.db") as conn:
+        return conn.execute(
+            "SELECT key, type, status, source_path, COUNT(*) FROM acw_blocks "
+            "GROUP BY key, type, status, source_path ORDER BY key, type, status, source_path",
+        ).fetchall()
+
+
+def _request_statuses(workspace: Path) -> dict[str, str]:
+    import json
+
+    request_dir = workspace / ".llmwiki" / "agent_queue" / "requests"
+    return {
+        path.stem: str(json.loads(path.read_text(encoding="utf-8")).get("status"))
+        for path in sorted(request_dir.glob("*.json"))
+    }

@@ -25,6 +25,26 @@ Block status semantics matter. `current` blocks are the default evidence for bui
 Pass `statuses=["*"]` to `wiki_page` when you need historical `deprecated` context or every
 status still present in page markdown. `wiki_coverage(source)` shows ledger-derived source coverage.
 
+## AgentProvider Queue Bridge
+
+When `ACW_LLM_PROVIDER=agent`, ACW v2 routes each structured reasoning request through MCP queue
+tools instead of a hosted LLM provider. Use this loop:
+1. Call `acw_next_request()`.
+2. If it returns a pending request, inspect `call_site`, `payload`, and `schema`.
+3. Return a JSON object matching the call-site shape with `acw_answer_request(request_id, response_json)`.
+4. Repeat until `acw_next_request()` returns `no pending requests`.
+
+The bridge does not validate call-site semantics; `complete_validated()` applies the same retry
+and validator path used by OpenAI and FakeLLM.
+
+Per-call-site response shapes:
+- C1 placement: `{"chunks":[{"chunk_id":"ch_...","relevant":true,"irrelevant_reason":null,"placements":[{"page":{"existing_page_id":"pg_..."},"new_page":null,"section":"Rules","block":{"key":"domain.entity.attribute","type":"rule","content":"...","excerpt":"...","new_key_justification":"..."},"links":[]}]}]}`
+- C2 flow extraction: `{"mermaid":"graph TD...","nodes":["node_id"],"edges":[{"from":"a","to":"b","condition":null}]}`
+- C3 conflict judge: `{"verdict":"distinct|duplicate|conflict","conflict_type":null,"recommendation":"needs_more_info","rationale":"..."}`
+- C4 merge draft: `{"content":"...","excerpt_policy":"keep_both"}`
+- C5 summary: `{"summary_markdown":"..."}`
+- C6 transcript pre-pass: `{"segments":[{"chunk_id":"ch_...","relevant":true,"reason":null,"superseded_by_chunk_id":null,"key_hint":null,"source_date_extracted":null}]}`
+
 ## Reading Images
 
 The `read` tool can return native MCP image blocks. Use `include_images=true` when visual content matters:
