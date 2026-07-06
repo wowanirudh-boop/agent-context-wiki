@@ -441,6 +441,133 @@ async def test_bulk_exclusion_checkpoint_review_apply_and_lint(
     assert {row["disposition_reason"] for row in approved} == {"table rows look unrelated to the workspace"}
 
 
+@pytest.mark.asyncio
+async def test_generated_artifact_paths_are_excluded_from_acw_source_ledger(
+    tmp_workspace: Path,
+    tmp_sqlite: aiosqlite.Connection,
+) -> None:
+    from core.db.migrate import apply_migrations
+    from core.ingest import index_document_chunks
+
+    await _apply_base_schema(tmp_sqlite)
+    await _seed_workspace(tmp_sqlite)
+    await apply_migrations(tmp_sqlite)
+    for doc_id, relative_path in [
+        ("doc_meta", "wiki/_meta/ledger.json"),
+        ("doc_review", "wiki/_reviews/RR-run.md"),
+        ("doc_page", "wiki/refunds.md"),
+        ("doc_state", ".llmwiki/domain_hint.md"),
+    ]:
+        await _insert_document(tmp_sqlite, doc_id=doc_id, relative_path=relative_path)
+        await index_document_chunks(
+            tmp_sqlite,
+            doc_id,
+            tmp_workspace,
+            content="Generated artifact content that legacy search may index but ACW v2 must not ledger.",
+            chunks=[_chunk(0, "Generated artifact content that legacy search may index but ACW v2 must not ledger.")],
+        )
+
+    versions = await _fetch_all(tmp_sqlite, "SELECT source_id FROM acw_source_versions ORDER BY source_id")
+    ledger_rows = await _fetch_all(tmp_sqlite, "SELECT source_id FROM acw_chunk_ledger ORDER BY source_id")
+    chunk_rows = await _fetch_all(
+        tmp_sqlite,
+        "SELECT dc.document_id, dc.source_version_id "
+        "FROM document_chunks dc JOIN documents d ON d.id = dc.document_id "
+        "WHERE d.relative_path LIKE 'wiki/%' OR d.relative_path LIKE '.llmwiki/%' "
+        "ORDER BY dc.document_id",
+    )
+
+    assert versions == []
+    assert ledger_rows == []
+    assert chunk_rows
+    assert {row["source_version_id"] for row in chunk_rows} == {None}
+
+
+def test_generated_artifacts_do_not_reenter_ledger_across_two_process_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sqlite3
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "docs" / "refund_policy.md"
+    source.parent.mkdir()
+    source.write_text(
+        "Refund operations require supervisors to approve returns within 30 days for warranty-backed orders. "
+        "Support agents use this policy when deciding whether a case should be escalated, refunded, "
+        "or routed back to the merchant team. The policy includes operational details that should remain "
+        "available to downstream testing and RCA agents.",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ACW_LLM_PROVIDER", "fake-rules")
+    module = _load_llmwiki_module()
+
+    module.cmd_process(str(workspace))
+    first_rows = _ledger_paths(workspace)
+    assert first_rows
+    assert all(not _is_generated_path(path) for path, _ in first_rows)
+    assert (workspace / "wiki" / "_meta" / "ledger.json").is_file()
+    assert (workspace / ".llmwiki" / "domain_hint.md").is_file()
+
+    module.cmd_process(str(workspace))
+    second_rows = _ledger_paths(workspace)
+
+    with sqlite3.connect(workspace / ".llmwiki" / "index.db") as conn:
+        generated_chunk_count = conn.execute(
+            "SELECT COUNT(*) FROM document_chunks dc "
+            "JOIN documents d ON d.id = dc.document_id "
+            "WHERE d.relative_path LIKE 'wiki/%' OR d.relative_path LIKE '.llmwiki/%'",
+        ).fetchone()[0]
+
+    assert second_rows == first_rows
+    assert generated_chunk_count > 0
+
+
+@pytest.mark.asyncio
+async def test_lint_01_reports_excluded_and_missing_source_version_ledger_orphans(
+    tmp_workspace: Path,
+    tmp_sqlite: aiosqlite.Connection,
+) -> None:
+    from core.lint.runner import lint_workspace
+
+    await _seed_orphaned_ledger_workspace(tmp_sqlite)
+
+    findings = await lint_workspace(tmp_workspace)
+
+    lint_01 = [finding for finding in findings if finding.code == "LINT-01"]
+    assert {finding.ref for finding in lint_01} >= {"ch_excluded", "ch_missing_version"}
+    assert any("excluded source path" in finding.message for finding in lint_01)
+    assert any("source version no longer exists" in finding.message for finding in lint_01)
+
+
+@pytest.mark.asyncio
+async def test_prune_ledger_cli_removes_excluded_and_missing_source_version_orphans(
+    tmp_workspace: Path,
+    tmp_sqlite: aiosqlite.Connection,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from core.lint.runner import lint_workspace
+
+    await _seed_orphaned_ledger_workspace(tmp_sqlite)
+    module = _load_llmwiki_module()
+
+    await asyncio.to_thread(module.cmd_prune_ledger, str(tmp_workspace))
+    output = capsys.readouterr().out
+    findings = await lint_workspace(tmp_workspace)
+    remaining_ledger = await _fetch_all(tmp_sqlite, "SELECT id FROM acw_chunk_ledger ORDER BY id")
+    remaining_chunks = await _fetch_all(tmp_sqlite, "SELECT id FROM document_chunks ORDER BY id")
+    remaining_versions = await _fetch_all(tmp_sqlite, "SELECT id FROM acw_source_versions ORDER BY id")
+
+    assert "ledger_rows: 2" in output
+    assert "document_chunks: 2" in output
+    assert "source_versions: 1" in output
+    assert remaining_ledger == [{"id": "ch_valid"}]
+    assert remaining_chunks == [{"id": "dc_valid"}]
+    assert remaining_versions == [{"id": "sv_valid"}]
+    assert not [finding for finding in findings if finding.code == "LINT-01" and "orphan" in finding.message]
+
+
 def _block(
     *,
     block_id: str,
@@ -497,3 +624,86 @@ def _fingerprint(chunk_ids: list[str]) -> str:
     from tests.v2.fakes.fake_llm import fingerprint_payload
 
     return fingerprint_payload({"chunks": [{"id": chunk_id} for chunk_id in chunk_ids]})
+
+
+def _ledger_paths(workspace: Path) -> list[tuple[str, str]]:
+    import sqlite3
+
+    with sqlite3.connect(workspace / ".llmwiki" / "index.db") as conn:
+        return conn.execute(
+            "SELECT d.relative_path, cl.id "
+            "FROM acw_chunk_ledger cl JOIN documents d ON d.id = cl.source_id "
+            "ORDER BY d.relative_path, cl.ordinal, cl.id",
+        ).fetchall()
+
+
+def _is_generated_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").casefold()
+    return normalized.startswith("wiki/") or normalized.startswith(".llmwiki/")
+
+
+async def _seed_orphaned_ledger_workspace(db: aiosqlite.Connection) -> None:
+    from core.db.dao import ACWDao
+    from core.db.migrate import apply_migrations
+    from core.ledger import ChunkLedger
+
+    await _apply_base_schema(db)
+    await _seed_workspace(db)
+    await apply_migrations(db)
+    await _insert_document(db, doc_id="doc_valid", relative_path="docs/source.md")
+    await _insert_document(db, doc_id="doc_excluded", relative_path="wiki/_meta/ledger.json")
+    ledger = ChunkLedger(ACWDao(db))
+    sv_valid = await ledger.ensure_source_version(
+        source_id="doc_valid",
+        version_hash="valid-v1",
+        source_date="unknown",
+        source_date_origin="unknown",
+        source_version_id="sv_valid",
+    )
+    sv_excluded = await ledger.ensure_source_version(
+        source_id="doc_excluded",
+        version_hash="excluded-v1",
+        source_date="unknown",
+        source_date_origin="unknown",
+        source_version_id="sv_excluded",
+    )
+    await db.executemany(
+        "INSERT INTO document_chunks "
+        "(id, document_id, chunk_index, content, source_content, token_count, content_hash, source_version_id) "
+        "VALUES (?, ?, ?, ?, ?, 10, ?, ?)",
+        [
+            ("dc_valid", "doc_valid", 0, "valid content", "valid content", "hash-valid", sv_valid["id"]),
+            ("dc_excluded", "doc_excluded", 0, "excluded content", "excluded content", "hash-excluded", sv_excluded["id"]),
+            ("dc_missing_version", "doc_valid", 1, "missing version content", "missing version content", "hash-missing", "sv_missing"),
+        ],
+    )
+    await ledger.create_pending_chunk(
+        source_id="doc_valid",
+        source_version_id=sv_valid["id"],
+        content_hash="hash-valid",
+        ordinal=0,
+        document_chunk_id="dc_valid",
+        chunk_id="ch_valid",
+    )
+    await ledger.mark_irrelevant("ch_valid", reason="valid disposition")
+    await ledger.create_pending_chunk(
+        source_id="doc_excluded",
+        source_version_id=sv_excluded["id"],
+        content_hash="hash-excluded",
+        ordinal=0,
+        document_chunk_id="dc_excluded",
+        chunk_id="ch_excluded",
+    )
+    await ledger.mark_irrelevant("ch_excluded", reason="legacy generated artifact")
+    await db.commit()
+
+    await db.execute("PRAGMA foreign_keys=OFF")
+    await db.execute(
+        "INSERT INTO acw_chunk_ledger "
+        "(id, source_id, source_version_id, content_hash, document_chunk_id, ordinal, disposition, "
+        "disposition_reason, duplicate_of_block_id, attempts, updated_at) "
+        "VALUES ('ch_missing_version', 'doc_valid', 'sv_missing', 'hash-missing', 'dc_missing_version', "
+        "1, 'irrelevant', 'orphan fixture', NULL, 0, '2026-07-06T00:00:00Z')",
+    )
+    await db.commit()
+    await db.execute("PRAGMA foreign_keys=ON")

@@ -9,6 +9,7 @@ Usage:
     llmwiki mcp-config <workspace>   Print claude_desktop_config.json snippet
     llmwiki reindex <workspace>      Force full rebuild of index.db
     llmwiki process <workspace>      Run the v2 placement pipeline
+    llmwiki prune-ledger <workspace> Remove excluded/orphaned v2 ledger rows
     llmwiki reset-dispositions <workspace> --source <path-substring> --from <disposition> --to pending
     llmwiki apply-decisions <workspace> [review_file]
     llmwiki import-decisions <workspace> <csv_path>
@@ -317,6 +318,25 @@ def cmd_process(workspace: str) -> None:
     print(f"  page_writes: {result.stats.get('page_writes', 0)}")
 
 
+def cmd_prune_ledger(workspace: str) -> None:
+    ws = Path(workspace).resolve()
+    db_path = ws / ".llmwiki" / "index.db"
+    if not db_path.exists():
+        print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
+        sys.exit(1)
+
+    from core.lock import WorkspaceLock
+    from core.prune import prune_ledger
+
+    with WorkspaceLock(ws, "prune-ledger"):
+        result = asyncio.run(prune_ledger(ws))
+    print(f"OK Pruned ledger: {ws}")
+    print(f"  ledger_rows: {result.ledger_rows}")
+    print(f"  block_chunk_links: {result.block_chunk_links}")
+    print(f"  document_chunks: {result.document_chunks}")
+    print(f"  source_versions: {result.source_versions}")
+
+
 def cmd_apply_decisions(workspace: str, review_file: str | None = None) -> None:
     ws = Path(workspace).resolve()
     db_path = ws / ".llmwiki" / "index.db"
@@ -513,7 +533,7 @@ def _apply_acw_migrations(ws: Path) -> None:
     asyncio.run(migrate_workspace(ws))
 
 
-def main():
+def main():  # noqa: C901 - CLI dispatcher grows one branch per command.
     parser = argparse.ArgumentParser(
         prog="llmwiki",
         description="LLM Wiki - local-first knowledge workspace",
@@ -541,6 +561,9 @@ def main():
 
     p_process = sub.add_parser("process", help="Run the v2 placement pipeline")
     p_process.add_argument("workspace", help="Path to workspace folder")
+
+    p_prune = sub.add_parser("prune-ledger", help="Remove excluded/orphaned v2 ledger rows")
+    p_prune.add_argument("workspace", help="Path to workspace folder")
 
     p_reset = sub.add_parser("reset-dispositions", help="Reset matching v2 chunk ledger dispositions to pending")
     p_reset.add_argument("workspace", help="Path to workspace folder")
@@ -609,6 +632,8 @@ def main():
         cmd_reindex(args.workspace)
     elif args.command == "process":
         cmd_process(args.workspace)
+    elif args.command == "prune-ledger":
+        cmd_prune_ledger(args.workspace)
     elif args.command == "reset-dispositions":
         cmd_reset_dispositions(
             args.workspace,

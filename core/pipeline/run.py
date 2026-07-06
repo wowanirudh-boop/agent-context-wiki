@@ -308,6 +308,7 @@ async def _worklist(db: aiosqlite.Connection, *, max_attempts: int) -> list[Row]
         "LEFT JOIN document_chunks dc ON dc.id = cl.document_chunk_id "
         "LEFT JOIN acw_source_versions sv ON sv.id = cl.source_version_id "
         "WHERE d.source_kind = 'source' AND d.relative_path NOT LIKE 'eval/%' "
+        "AND d.relative_path NOT LIKE 'wiki/%' AND d.relative_path NOT LIKE '.llmwiki/%' "
         "AND (cl.disposition = 'pending' OR (cl.disposition = 'failed' AND cl.attempts < ?)) "
         "ORDER BY d.relative_path, cl.ordinal",
         (max_attempts,),
@@ -370,7 +371,8 @@ async def _mark_out_of_scope_chunks(db: aiosqlite.Connection, ledger: ChunkLedge
     cursor = await db.execute(
         "SELECT cl.id, cl.disposition FROM acw_chunk_ledger cl "
         "JOIN documents d ON d.id = cl.source_id "
-        "WHERE (d.source_kind != 'source' OR d.relative_path LIKE 'eval/%') "
+        "WHERE (d.source_kind != 'source' OR d.relative_path LIKE 'eval/%' "
+        "OR d.relative_path LIKE 'wiki/%' OR d.relative_path LIKE '.llmwiki/%') "
         "AND cl.disposition IN ('pending', 'failed')",
     )
     rows = await cursor.fetchall()

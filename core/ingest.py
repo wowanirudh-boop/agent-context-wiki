@@ -13,6 +13,7 @@ import aiosqlite
 from core.db.dao import ACWDao, Row, fetch_all, fetch_one, utc_now
 from core.db.migrate import apply_migrations
 from core.ledger import ChunkLedger
+from core.source_exclusions import is_acw_source_excluded
 
 _DATE_KEYS = ("source_date", "meeting_date", "document_date", "date")
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(?P<body>.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
@@ -41,7 +42,10 @@ async def index_document_chunks(
     if source_text is None:
         source_text = ""
 
-    source_version = await _ensure_source_version(db, document, workspace, source_text)
+    excluded_from_acw = is_acw_source_excluded(str(document["relative_path"]))
+    source_version = None
+    if not excluded_from_acw:
+        source_version = await _ensure_source_version(db, document, workspace, source_text)
 
     if replace:
         chunks = chunks if chunks is not None else _chunk_text(source_text)
@@ -64,14 +68,19 @@ async def index_document_chunks(
                     chunk.token_count,
                     chunk.header_breadcrumb,
                     content_hash,
-                    source_version["id"],
+                    None if source_version is None else source_version["id"],
                 ),
             )
         await db.commit()
     else:
-        await _stamp_existing_chunks(db, document_id, source_version["id"])
+        await _stamp_existing_chunks(
+            db,
+            document_id,
+            None if source_version is None else source_version["id"],
+        )
 
-    await _seed_ledger_for_current_chunks(db, document_id, source_version["id"])
+    if source_version is not None:
+        await _seed_ledger_for_current_chunks(db, document_id, source_version["id"])
 
 
 async def seed_existing_document_chunks(
@@ -154,7 +163,7 @@ async def _ensure_source_version(
 async def _stamp_existing_chunks(
     db: aiosqlite.Connection,
     document_id: str,
-    source_version_id: str,
+    source_version_id: str | None,
 ) -> None:
     rows = await _document_chunks(db, document_id)
     for row in rows:

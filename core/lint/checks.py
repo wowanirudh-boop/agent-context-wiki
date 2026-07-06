@@ -17,6 +17,7 @@ from core.coverage import _ledger_rows_by_source, _page_coverage_body, _page_sou
 from core.db.dao import ACWDao, Row, fetch_all
 from core.models import BlockStatus, LintFinding, LintSeverity
 from core.review.emit import find_unresolved_review_files
+from core.source_exclusions import is_acw_source_excluded
 
 _ACTIVE_KEY_STATUSES = {BlockStatus.current.value, BlockStatus.needs_review.value}
 _WIKI_LINK_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?P<anchor>#[^\]|]+)?(?P<label>\|[^\]]+)?\]\]")
@@ -76,6 +77,7 @@ async def _check_lint_01_coverage(
     pages: list[ParsedWikiPage],
 ) -> list[LintFinding]:
     findings: list[LintFinding] = []
+    findings.extend(await _check_lint_01_ledger_orphans(db))
     cursor = await db.execute(
         "SELECT cl.id, cl.disposition, d.relative_path AS source_path "
         "FROM acw_chunk_ledger cl JOIN documents d ON d.id = cl.source_id "
@@ -318,6 +320,41 @@ async def _db_page_block_ids(db: aiosqlite.Connection, page_id: str) -> set[str]
         (page_id,),
     )
     return {str(row[0]) for row in await cursor.fetchall()}
+
+
+async def _check_lint_01_ledger_orphans(db: aiosqlite.Connection) -> list[LintFinding]:
+    findings: list[LintFinding] = []
+    cursor = await db.execute(
+        "SELECT cl.id, cl.source_version_id, d.relative_path AS source_path, "
+        "CASE WHEN sv.id IS NULL THEN 1 ELSE 0 END AS missing_source_version "
+        "FROM acw_chunk_ledger cl "
+        "JOIN documents d ON d.id = cl.source_id "
+        "LEFT JOIN acw_source_versions sv ON sv.id = cl.source_version_id "
+        "ORDER BY d.relative_path, cl.ordinal, cl.id",
+    )
+    for row in await fetch_all(cursor):
+        source_path = str(row["source_path"])
+        if int(row["missing_source_version"]):
+            findings.append(
+                _finding(
+                    "LINT-01",
+                    "error",
+                    source_path,
+                    str(row["id"]),
+                    f"orphaned ledger row references source version no longer exists: {row['source_version_id']}",
+                )
+            )
+        if is_acw_source_excluded(source_path):
+            findings.append(
+                _finding(
+                    "LINT-01",
+                    "error",
+                    source_path,
+                    str(row["id"]),
+                    "orphaned ledger row references excluded source path",
+                )
+            )
+    return findings
 
 
 async def _open_review_row_ids(db: aiosqlite.Connection) -> set[str]:
