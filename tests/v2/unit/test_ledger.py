@@ -48,7 +48,7 @@ async def test_fr_ledger_01_migration_idempotence_preserves_existing_index_data(
     await apply_migrations(tmp_sqlite)
 
     versions = await _fetch_column(tmp_sqlite, "SELECT version FROM acw_schema_version")
-    assert versions == [1]
+    assert versions == [1, 2]
 
     chunk_columns = await _table_columns(tmp_sqlite, "document_chunks")
     assert "content_hash" in chunk_columns

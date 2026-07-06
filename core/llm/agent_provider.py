@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from core.db.dao import ACWDao
+from core.llm.instructions import INSTRUCTIONS
 from core.llm.provider import LLMProvider, StructuredPayload, StructuredResponse, StructuredSchema
 from core.models import EventKind
 
@@ -37,7 +38,8 @@ class AgentQueue:
         schema: StructuredSchema,
     ) -> dict[str, Any]:
         self._ensure_dirs()
-        request_id = stable_request_id(call_site, payload, schema)
+        instructions = INSTRUCTIONS[call_site]
+        request_id = stable_request_id(call_site, payload, schema, instructions=instructions)
         request_path = self.request_path(request_id)
         answer_path = self.answer_path(request_id)
         if request_path.exists():
@@ -47,6 +49,7 @@ class AgentQueue:
             request = {
                 "request_id": request_id,
                 "call_site": call_site,
+                "instructions": instructions,
                 "payload": dict(payload),
                 "schema": dict(schema),
                 "created_at": utc_now(),
@@ -58,6 +61,7 @@ class AgentQueue:
         request = {
             "request_id": request_id,
             "call_site": call_site,
+            "instructions": instructions,
             "payload": dict(payload),
             "schema": dict(schema),
             "created_at": utc_now(),
@@ -194,9 +198,15 @@ class AgentProvider(LLMProvider):
         )
 
 
-def stable_request_id(call_site: str, payload: StructuredPayload, schema: StructuredSchema) -> str:
+def stable_request_id(
+    call_site: str,
+    payload: StructuredPayload,
+    schema: StructuredSchema,
+    *,
+    instructions: str | None = None,
+) -> str:
     canonical = json.dumps(
-        {"call_site": call_site, "payload": payload, "schema": schema},
+        {"call_site": call_site, "instructions": instructions, "payload": payload, "schema": schema},
         sort_keys=True,
         separators=(",", ":"),
         default=str,

@@ -14,6 +14,7 @@ class Disposition(StrEnum):
     placed = "placed"
     duplicate = "duplicate"
     irrelevant = "irrelevant"
+    exclusion_pending = "exclusion_pending"
     conflicted_pending = "conflicted_pending"
     failed = "failed"
     failed_final = "failed_final"
@@ -62,12 +63,15 @@ class ReviewDecision(StrEnum):
     reject_new = "reject_new"
     delete_duplicate = "delete_duplicate"
     needs_more_info = "needs_more_info"
+    approve_exclusion = "approve_exclusion"
+    reinstate = "reinstate"
 
 
 class ReviewRowKind(StrEnum):
     conflict = "conflict"
     needs_review = "needs_review"
     taxonomy_merge = "taxonomy_merge"
+    exclusion = "exclusion"
 
 
 class RunStatus(StrEnum):

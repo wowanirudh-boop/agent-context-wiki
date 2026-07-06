@@ -223,7 +223,7 @@ async def test_nfr_03_synthetic_scale_smoke_50_sources_5000_chunks_completes_wit
     assert _ledger_disposition_count(workspace, "pending") == 0
     assert _ledger_disposition_count(workspace, "failed") == 0
     assert _ledger_disposition_count(workspace, "failed_final") == 0
-    assert _ledger_disposition_count(workspace, "irrelevant") == 5000
+    assert _ledger_disposition_count(workspace, "exclusion_pending") == 5000
     assert_invariants(workspace)
 
 

@@ -5,6 +5,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from core.llm.instructions import INSTRUCTIONS
 from core.llm.agent_provider import AgentQueue
 
 from .wiki_read import _workspace_root
@@ -13,7 +14,7 @@ AGENT_BRIDGE_DOC = """AgentProvider queue bridge for ACW v2.
 
 Loop for an MCP-connected reasoning agent:
 1. Call acw_next_request().
-2. Read call_site, payload, and schema.
+2. Read call_site, instructions, payload, and schema; follow the instructions field for that request.
 3. Produce a JSON object matching the requested call-site schema.
 4. Call acw_answer_request(request_id, response_json).
 5. Repeat until acw_next_request() says no pending requests.
@@ -40,6 +41,7 @@ class AgentBridgeHandler:
             "pending": True,
             "request_id": request["request_id"],
             "call_site": request["call_site"],
+            "instructions": request.get("instructions") or INSTRUCTIONS.get(str(request["call_site"]), ""),
             "payload": request["payload"],
             "schema": request["schema"],
         }

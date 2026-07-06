@@ -39,7 +39,7 @@ CREATE TABLE acw_chunk_ledger (
   document_chunk_id TEXT,                    -- FK into document_chunks.id (current version)
   ordinal INTEGER NOT NULL,
   disposition TEXT NOT NULL CHECK (disposition IN
-    ('pending','placed','duplicate','irrelevant','conflicted_pending',
+    ('pending','placed','duplicate','irrelevant','exclusion_pending','conflicted_pending',
      'failed','failed_final','superseded')),
   disposition_reason TEXT,                   -- REQUIRED when 'irrelevant' or 'failed*'
   duplicate_of_block_id TEXT,                -- REQUIRED when 'duplicate'
@@ -88,15 +88,16 @@ CREATE TABLE acw_runs (id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_a
 CREATE TABLE acw_review_rows (
   id TEXT PRIMARY KEY,                       -- 'RR-<run_id>-<n>'
   run_id TEXT NOT NULL REFERENCES acw_runs(id),
-  page_id TEXT NOT NULL REFERENCES acw_pages(id),
-  row_kind TEXT NOT NULL CHECK (row_kind IN ('conflict','needs_review','taxonomy_merge')),
+  page_id TEXT REFERENCES acw_pages(id),      -- NULL for source-level exclusion rows
+  row_kind TEXT NOT NULL CHECK (row_kind IN ('conflict','needs_review','taxonomy_merge','exclusion')),
   existing_block_id TEXT,                    -- NULL for pure-new candidates / taxonomy rows
   candidate_json TEXT,                       -- serialized CandidateBlock (NULL for taxonomy)
   conflict_type TEXT,                        -- §6 enum; NULL for non-conflict rows
   recommendation TEXT NOT NULL,
   recommendation_basis TEXT,                 -- 'source_date' | 'mtime' (FR-CONF-04)
   decision TEXT CHECK (decision IN ('accept_new','keep_existing','merge','mark_conflicted',
-    'deprecate_existing','reject_new','delete_duplicate','needs_more_info')),
+    'deprecate_existing','reject_new','delete_duplicate','needs_more_info',
+    'approve_exclusion','reinstate')),
   notes TEXT, applied_at TEXT
 );
 
@@ -189,14 +190,17 @@ Run: <run_id> · Started: <iso> · Rows: <n> · Status: open
 ```
 
 Parser rules (`core/review/parse.py`): rows are `### Row <id> · <row_kind> · <conflict_type?>`
-sections; `decision:` accepts exactly the eight enum values (case-insensitive, surrounding
-whitespace ignored); anything else → per-row validation error; `apply-decisions` aborts with a
+sections; `decision:` accepts the enum values allowed for that row kind (case-insensitive,
+surrounding whitespace ignored); anything else → per-row validation error; `apply-decisions` aborts with a
 report listing every invalid row and applies nothing (validate-all-then-apply-all per file is
 NOT used — application is row-by-row but only after the whole file validates, FR-REV-04).
 Taxonomy rows (`row_kind=taxonomy_merge`) accept only `merge` (interpreted as merge_pages) /
 `reject_new` (ignore) / `needs_more_info`. The DB (`acw_review_rows`) is authoritative for row
 identity; the markdown file is the editing surface — at apply time, decisions/notes are read
 from the file and written back to the DB.
+Exclusion rows (`row_kind=exclusion`) are source-level rows (`page_id=NULL`) and accept only
+`approve_exclusion` (chunks → `irrelevant`) / `reinstate` (chunks → `pending`) /
+`needs_more_info`.
 
 ## 6. Conflict types (FR-CONF-02)
 
@@ -241,7 +245,8 @@ Tool docstrings must teach the two-tier pattern and status semantics (FR-READ-04
 Env (prefix `ACW_`): `ACW_LLM_API_KEY`, `ACW_LLM_BASE_URL` (default OpenAI),
 `ACW_LLM_MODEL` (default `gpt-5`; overridable), `ACW_LLM_MODEL_LIGHT` (relevance/judge),
 `ACW_AUTO_PROCESS` (default false — PRD Q1), `ACW_MAX_ATTEMPTS=3`,
-`ACW_NEEDS_REVIEW_STALE_DAYS=14`, `ACW_SUMMARY_MAX_WORDS=300`, `ACW_BATCH_MAX_CHUNKS=8`.
+`ACW_NEEDS_REVIEW_STALE_DAYS=14`, `ACW_SUMMARY_MAX_WORDS=300`, `ACW_BATCH_MAX_CHUNKS=8`,
+`ACW_EXCLUSION_REVIEW_THRESHOLD=0.5`.
 `.llmwiki/config.toml` `[acw]` section overrides env; precedence: toml > env > defaults.
 
 ## 11. Events taxonomy (`acw_events.kind`)

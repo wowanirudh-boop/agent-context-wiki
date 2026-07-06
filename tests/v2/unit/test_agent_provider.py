@@ -60,6 +60,8 @@ async def test_agent_provider_timeout_raises_and_leaves_pending_request(tmp_work
 async def test_agent_bridge_next_and_answer_request_queue_contract(tmp_workspace: Path) -> None:
     from tools.agent_bridge import AgentBridgeHandler, register
 
+    from core.llm.instructions import INSTRUCTIONS
+
     handler = AgentBridgeHandler(tmp_workspace)
     assert await handler.acw_next_request() == {"pending": False, "message": "no pending requests"}
 
@@ -80,6 +82,7 @@ async def test_agent_bridge_next_and_answer_request_queue_contract(tmp_workspace
         "pending": True,
         "request_id": "agent_test",
         "call_site": "C5",
+        "instructions": INSTRUCTIONS["C5"],
         "payload": {"title": "Refunds"},
         "schema": {"type": "object"},
     }

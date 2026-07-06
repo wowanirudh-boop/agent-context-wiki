@@ -8,7 +8,7 @@ import aiosqlite
 
 from core.config import ACWConfig, load_config
 from core.coverage import render_coverage_sections
-from core.db.dao import ACWDao, Row
+from core.db.dao import ACWDao, Row, json_dumps
 from core.db.migrate import apply_migrations
 from core.gitops import commit_processing_run, ensure_wiki_repo, mark_user_edited_blocks
 from core.ledger import ChunkLedger
@@ -36,6 +36,12 @@ from core.summary import render_summaries_and_index
 class ProcessingRunResult:
     run_id: str
     stats: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _IrrelevantCandidate:
+    chunk: Row
+    reason: str
 
 
 async def run_processing_run(
@@ -81,6 +87,7 @@ async def _run_processing_run_locked(
             "placed": 0,
             "duplicate": 0,
             "conflicted_pending": 0,
+            "exclusion_pending": 0,
             "irrelevant": 0,
             "failed": 0,
             "llm_calls": 0,
@@ -99,8 +106,31 @@ async def _run_processing_run_locked(
 
             worklist = await _worklist(db, max_attempts=cfg.max_attempts)
             had_work = bool(worklist)
-            for batch in batch_chunks_by_source(worklist, max_chunks=cfg.batch_max_chunks):
-                processed = await _process_batch(db, ledger, registry, writer, llm, batch, ws)
+            domain_hint = _workspace_domain_hint(ws)
+            for source_rows in _source_groups(worklist):
+                deferred_irrelevant: list[_IrrelevantCandidate] = []
+                for batch in batch_chunks_by_source(source_rows, max_chunks=cfg.batch_max_chunks):
+                    processed = await _process_batch(
+                        db,
+                        ledger,
+                        registry,
+                        writer,
+                        llm,
+                        batch,
+                        ws,
+                        domain_hint=domain_hint,
+                        deferred_irrelevant=deferred_irrelevant,
+                    )
+                    for key, value in processed.items():
+                        stats[key] = int(stats.get(key, 0)) + value
+                processed = await _finalize_deferred_irrelevant(
+                    dao,
+                    ledger,
+                    run_id,
+                    source_rows,
+                    deferred_irrelevant,
+                    threshold=cfg.exclusion_review_threshold,
+                )
                 for key, value in processed.items():
                     stats[key] = int(stats.get(key, 0)) + value
 
@@ -154,6 +184,9 @@ async def _process_batch(
     provider: LLMProvider,
     batch: list[Row],
     workspace: Path,
+    *,
+    domain_hint: str | None = None,
+    deferred_irrelevant: list[_IrrelevantCandidate] | None = None,
 ) -> dict[str, int]:
     del workspace
     if not batch:
@@ -167,7 +200,7 @@ async def _process_batch(
         return await _process_flow_batch(ledger, writer, provider, batch)
 
     payload = {
-        "workspace_domain_hint": "local workspace",
+        "workspace_domain_hint": domain_hint or "local workspace",
         "chunks": [_chunk_payload(chunk) for chunk in batch],
         "registry": placement_registry_payload(await registry.list_pages()),
         "page_context": await writer.page_context_payload(),
@@ -178,8 +211,13 @@ async def _process_batch(
     for item in response["chunks"]:
         chunk = by_id[str(item["chunk_id"])]
         if not item["relevant"]:
-            await ledger.mark_irrelevant(str(chunk["id"]), reason=str(item["irrelevant_reason"]))
-            counts["irrelevant"] += 1
+            if deferred_irrelevant is None:
+                await ledger.mark_irrelevant(str(chunk["id"]), reason=str(item["irrelevant_reason"]))
+                counts["irrelevant"] += 1
+            else:
+                deferred_irrelevant.append(
+                    _IrrelevantCandidate(chunk=chunk, reason=str(item["irrelevant_reason"]))
+                )
             continue
         try:
             for placement in item["placements"]:
@@ -280,6 +318,46 @@ async def _worklist(db: aiosqlite.Connection, *, max_attempts: int) -> list[Row]
     return rows
 
 
+async def _finalize_deferred_irrelevant(
+    dao: ACWDao,
+    ledger: ChunkLedger,
+    run_id: str,
+    source_rows: list[Row],
+    deferred: list[_IrrelevantCandidate],
+    *,
+    threshold: float,
+) -> dict[str, int]:
+    if not deferred:
+        return {}
+    if len(deferred) / max(len(source_rows), 1) > threshold:
+        reason = _dominant_reason(deferred)
+        for item in deferred:
+            await ledger.mark_exclusion_pending(str(item.chunk["id"]), reason=reason)
+        await dao.create_review_row(
+            run_id=run_id,
+            page_id=None,
+            row_kind="exclusion",
+            candidate_json=json_dumps(
+                {
+                    "source_id": source_rows[0]["source_id"],
+                    "source_path": source_rows[0]["source_path"],
+                    "chunk_ids": [item.chunk["id"] for item in deferred],
+                    "excluded_count": len(deferred),
+                    "total_count": len(source_rows),
+                    "reason": reason,
+                    "samples": _sample_texts(deferred),
+                }
+            ),
+            recommendation="needs_more_info",
+            recommendation_basis="exclusion_review_threshold",
+        )
+        return {"exclusion_pending": len(deferred)}
+
+    for item in deferred:
+        await ledger.mark_irrelevant(str(item.chunk["id"]), reason=item.reason)
+    return {"irrelevant": len(deferred)}
+
+
 async def _pending_count(db: aiosqlite.Connection) -> int:
     cursor = await db.execute("SELECT COUNT(*) FROM acw_chunk_ledger WHERE disposition = 'pending'")
     return int((await cursor.fetchone())[0])
@@ -307,6 +385,43 @@ def _chunk_payload(chunk: Row) -> dict[str, Any]:
         "breadcrumb": chunk.get("breadcrumb") or "",
         "source_path": chunk["source_path"],
     }
+
+
+def _workspace_domain_hint(workspace: Path) -> str:
+    path = workspace / ".llmwiki" / "domain_hint.md"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return "local workspace"
+
+
+def _source_groups(rows: list[Row]) -> list[list[Row]]:
+    groups: list[list[Row]] = []
+    current_source: str | None = None
+    current: list[Row] = []
+    for row in rows:
+        source_id = str(row["source_id"])
+        if current and source_id != current_source:
+            groups.append(current)
+            current = []
+        current.append(row)
+        current_source = source_id
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _dominant_reason(items: list[_IrrelevantCandidate]) -> str:
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.reason] = counts.get(item.reason, 0) + 1
+    return sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[0][0]
+
+
+def _sample_texts(items: list[_IrrelevantCandidate]) -> list[str]:
+    samples = [str(item.chunk.get("text") or "").strip() for item in items if str(item.chunk.get("text") or "").strip()]
+    if len(samples) <= 5:
+        return samples
+    return samples[:5]
 
 
 def _source_kind_from_metadata(metadata_raw: Any) -> str:

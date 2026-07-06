@@ -331,7 +331,7 @@ class ACWDao:
         self,
         *,
         run_id: str,
-        page_id: str,
+        page_id: str | None,
         row_kind: str,
         recommendation: str,
         row_id: str | None = None,

@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from core.config import ACWConfig, load_config
 from core.db.dao import ACWDao
+from core.llm.instructions import INSTRUCTIONS
 from core.models import EventKind
 
 StructuredSchema = Mapping[str, Any]
@@ -48,6 +49,10 @@ class OpenAIProvider:
             response = await client.responses.create(
                 model=model,
                 input=[
+                    {
+                        "role": "system",
+                        "content": INSTRUCTIONS[call_site],
+                    },
                     {
                         "role": "user",
                         "content": json.dumps({"call_site": call_site, "payload": payload}, ensure_ascii=False),

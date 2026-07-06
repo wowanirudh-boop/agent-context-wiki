@@ -210,6 +210,15 @@ async def _check_lint_04_reviews_and_staleness(
             findings.append(
                 _finding("LINT-04", "warn", str(row["path"]), str(row["id"]), "needs_review block is older than threshold")
             )
+    cursor = await db.execute(
+        "SELECT id FROM acw_review_rows "
+        "WHERE row_kind = 'exclusion' AND applied_at IS NULL "
+        "ORDER BY id",
+    )
+    for row in await fetch_all(cursor):
+        findings.append(
+            _finding("LINT-04", "error", "wiki/_reviews", str(row["id"]), "unresolved exclusion review row")
+        )
     return findings
 
 

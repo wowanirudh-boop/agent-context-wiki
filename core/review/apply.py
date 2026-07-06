@@ -164,6 +164,9 @@ async def _validate_review_file(dao: ACWDao, parsed: ParsedReviewFile) -> dict[s
 async def _apply_row(ctx: _ReviewContext, row: Row, parsed_row: ParsedReviewRow) -> None:
     if row["row_kind"] == ReviewRowKind.taxonomy_merge.value:
         return
+    if row["row_kind"] == ReviewRowKind.exclusion.value:
+        await _apply_exclusion(ctx, row, parsed_row)
+        return
     decision = ReviewDecision(parsed_row.decision)
     if decision == ReviewDecision.accept_new:
         await _accept_new(ctx, row)
@@ -179,6 +182,21 @@ async def _apply_row(ctx: _ReviewContext, row: Row, parsed_row: ParsedReviewRow)
         await _keep_existing(ctx, row, remove_marker=False)
     elif decision == ReviewDecision.delete_duplicate:
         await _delete_duplicate(ctx, row)
+
+
+async def _apply_exclusion(ctx: _ReviewContext, row: Row, parsed_row: ParsedReviewRow) -> None:
+    decision = ReviewDecision(parsed_row.decision)
+    data = _candidate_json(row)
+    if not isinstance(data, dict):
+        raise ValueError(f"Review row {row['id']} has no exclusion candidate_json")
+    chunk_ids = [str(chunk_id) for chunk_id in data.get("chunk_ids", [])]
+    reason = str(data.get("reason") or "approved exclusion")
+    if decision == ReviewDecision.approve_exclusion:
+        for chunk_id in chunk_ids:
+            await ctx.ledger.mark_irrelevant(chunk_id, reason=reason)
+    elif decision == ReviewDecision.reinstate:
+        for chunk_id in chunk_ids:
+            await ctx.ledger.mark_pending(chunk_id)
 
 
 async def _accept_new(ctx: _ReviewContext, row: Row) -> None:
@@ -429,13 +447,19 @@ async def _block_chunk_ids(db: aiosqlite.Connection, block_id: str) -> list[str]
 
 
 def _candidate_block(row: Row) -> ContextBlock:
-    raw = row.get("candidate_json")
-    if not isinstance(raw, str) or not raw:
+    data = _candidate_json(row)
+    if data is None:
         raise ValueError(f"Review row {row['id']} has no candidate_json")
-    data: Any = json.loads(raw)
     if isinstance(data, dict) and isinstance(data.get("block"), dict):
         data = data["block"]
     return ContextBlock(**data)
+
+
+def _candidate_json(row: Row) -> Any:
+    raw = row.get("candidate_json")
+    if not isinstance(raw, str) or not raw:
+        return None
+    return json.loads(raw)
 
 
 def _find_block(page: Page, block_id: str) -> ContextBlock:

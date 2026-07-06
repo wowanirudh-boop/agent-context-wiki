@@ -23,6 +23,17 @@ C4_SCHEMA: StructuredSchema = {"type": "object", "required": ["content", "excerp
 C5_SCHEMA: StructuredSchema = {"type": "object", "required": ["summary_markdown"]}
 C6_SCHEMA: StructuredSchema = {"type": "object", "required": ["segments"]}
 
+_C3_RECOMMENDATIONS = {
+    ReviewDecision.accept_new.value,
+    ReviewDecision.keep_existing.value,
+    ReviewDecision.merge.value,
+    ReviewDecision.mark_conflicted.value,
+    ReviewDecision.deprecate_existing.value,
+    ReviewDecision.reject_new.value,
+    ReviewDecision.delete_duplicate.value,
+    ReviewDecision.needs_more_info.value,
+}
+
 
 class CallValidationError(ValueError):
     pass
@@ -103,7 +114,7 @@ def validate_c3_response(payload: StructuredPayload, response: StructuredRespons
     elif conflict_type is not None:
         raise CallValidationError("C3 non-conflict verdict requires conflict_type=null")
     recommendation = _string(response, "recommendation")
-    if recommendation not in {item.value for item in ReviewDecision}:
+    if recommendation not in _C3_RECOMMENDATIONS:
         raise CallValidationError(f"Unknown C3 recommendation: {recommendation}")
     if not _string(response, "rationale").strip():
         raise CallValidationError("C3 rationale is required")

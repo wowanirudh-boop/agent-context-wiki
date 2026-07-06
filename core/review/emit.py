@@ -12,6 +12,7 @@ from core.blocks.parser import parse_page
 from core.db.dao import ACWDao, Row, json_dumps
 from core.models import EventKind, ReviewRowKind
 from core.registry import PageRegistry
+from core.review.csv_io import write_review_csv
 from core.review.parse import unresolved_review_file
 
 
@@ -25,7 +26,7 @@ async def emit_review_file(workspace: str | Path, db: aiosqlite.Connection, run_
     pages = {str(page["id"]): page for page in await PageRegistry(dao).list_pages()}
     grouped: dict[str, list[Row]] = {}
     for row in rows:
-        grouped.setdefault(str(row["page_id"]), []).append(row)
+        grouped.setdefault(str(row["page_id"] or ""), []).append(row)
 
     lines = [
         f"# Review RR-{run_id}",
@@ -33,6 +34,12 @@ async def emit_review_file(workspace: str | Path, db: aiosqlite.Connection, run_
         "",
     ]
     for page_id, page_rows in grouped.items():
+        if page_id == "":
+            for row in page_rows:
+                lines.extend([f"## Source: `{_source_path_for_row(row)}`", ""])
+                lines.extend(_render_row(row, None, {}))
+                lines.append("")
+            continue
         page = pages[page_id]
         lines.extend([f"## Page: [[{page['title']}]] ({page['path']})", ""])
         page_blocks = _page_blocks(Path(workspace), page)
@@ -44,6 +51,7 @@ async def emit_review_file(workspace: str | Path, db: aiosqlite.Connection, run_
     review_dir.mkdir(parents=True, exist_ok=True)
     path = review_dir / f"RR-{run_id}.md"
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    write_review_csv(path.with_suffix(".csv"), workspace=Path(workspace), rows=rows, pages=pages)
     await dao.write_event(
         kind=EventKind.review_emitted,
         actor="core.review.emit",
@@ -106,12 +114,14 @@ def find_unresolved_review_files(workspace: str | Path) -> list[str]:
     return unresolved
 
 
-def _render_row(row: Row, page: Row, page_blocks: dict[str, ContextBlock]) -> list[str]:
+def _render_row(row: Row, page: Row | None, page_blocks: dict[str, ContextBlock]) -> list[str]:
     heading = f"### Row {row['id']} \u00b7 {row['row_kind']}"
     if row["conflict_type"]:
         heading = f"{heading} \u00b7 {row['conflict_type']}"
     if row["row_kind"] == ReviewRowKind.taxonomy_merge.value:
         return _render_taxonomy_row(row, heading)
+    if row["row_kind"] == ReviewRowKind.exclusion.value:
+        return _render_exclusion_row(row, heading)
 
     existing = page_blocks.get(str(row["existing_block_id"]))
     candidate = _candidate_block(row)
@@ -146,6 +156,37 @@ def _render_row(row: Row, page: Row, page_blocks: dict[str, ContextBlock]) -> li
         ]
     )
     return lines
+
+
+def _render_exclusion_row(row: Row, heading: str) -> list[str]:
+    candidate = _candidate_json(row)
+    data = candidate if isinstance(candidate, dict) else {}
+    source_path = str(data.get("source_path") or "")
+    samples = [str(sample) for sample in data.get("samples", []) if str(sample).strip()]
+    lines = [
+        heading,
+        f"- source: {source_path}",
+        f"- excluded: {data.get('excluded_count', 0)}/{data.get('total_count', 0)}",
+        f"- reason: {data.get('reason', '')}",
+    ]
+    if samples:
+        lines.append("- samples:")
+        lines.extend(f"  - {_single_line(sample)}" for sample in samples)
+    lines.extend(
+        [
+            f"- recommendation: {row['recommendation']} \u2014 bulk irrelevant threshold exceeded",
+            "- decision:",
+            "- notes:",
+        ]
+    )
+    return lines
+
+
+def _source_path_for_row(row: Row) -> str:
+    candidate = _candidate_json(row)
+    if isinstance(candidate, dict):
+        return str(candidate.get("source_path") or "unknown source")
+    return "unknown source"
 
 
 def _render_taxonomy_row(row: Row, heading: str) -> list[str]:

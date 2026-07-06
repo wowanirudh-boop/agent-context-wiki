@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from core.db.dao import ACWDao, Row, utc_now
-from core.models import Disposition
+from core.models import Disposition, EventKind
 
 
 class LedgerValidationError(ValueError):
@@ -106,6 +106,18 @@ class ChunkLedger:
             updated_at=updated_at,
         )
 
+    async def mark_exclusion_pending(self, chunk_id: str, *, reason: str, updated_at: str | None = None) -> Row:
+        if not reason:
+            raise LedgerValidationError("exclusion_pending chunks require a reason")
+        return await self._transition(
+            chunk_id,
+            Disposition.exclusion_pending,
+            reason=reason,
+            duplicate_of_block_id=None,
+            attempts_delta=0,
+            updated_at=updated_at,
+        )
+
     async def mark_conflicted_pending(self, chunk_id: str, *, reason: str | None = None, updated_at: str | None = None) -> Row:
         return await self._transition(
             chunk_id,
@@ -131,6 +143,16 @@ class ChunkLedger:
             updated_at=updated_at,
         )
 
+    async def mark_pending(self, chunk_id: str, *, updated_at: str | None = None) -> Row:
+        return await self._transition(
+            chunk_id,
+            Disposition.pending,
+            reason=None,
+            duplicate_of_block_id=None,
+            attempts_delta=0,
+            updated_at=updated_at,
+        )
+
     async def mark_pending_for_retry(self, chunk_id: str, *, updated_at: str | None = None) -> Row:
         current = await self._get_existing_chunk(chunk_id)
         if int(current["attempts"]) >= self.max_attempts:
@@ -153,6 +175,58 @@ class ChunkLedger:
             attempts_delta=0,
             updated_at=updated_at,
         )
+
+    async def reset_dispositions(
+        self,
+        *,
+        source_substring: str,
+        from_disposition: Disposition,
+        to_disposition: Disposition = Disposition.pending,
+        updated_at: str | None = None,
+    ) -> int:
+        if to_disposition != Disposition.pending:
+            raise LedgerValidationError("reset-dispositions only supports --to pending")
+        if not source_substring.strip():
+            raise LedgerValidationError("--source must not be empty")
+        cursor = await self.dao.db.execute(
+            "SELECT cl.id FROM acw_chunk_ledger cl "
+            "JOIN documents d ON d.id = cl.source_id "
+            "WHERE instr(lower(d.relative_path), lower(?)) > 0 AND cl.disposition = ? "
+            "ORDER BY d.relative_path, cl.ordinal, cl.id",
+            (source_substring, from_disposition.value),
+        )
+        chunk_ids = [str(row[0]) for row in await cursor.fetchall()]
+        if not chunk_ids:
+            await self.dao.write_event(
+                kind=EventKind.chunk_disposition,
+                actor="core.ledger",
+                payload={
+                    "source": source_substring,
+                    "from": from_disposition.value,
+                    "to": to_disposition.value,
+                    "count": 0,
+                },
+            )
+            return 0
+
+        timestamp = updated_at or utc_now()
+        await self.dao.db.executemany(
+            "UPDATE acw_chunk_ledger SET disposition = ?, disposition_reason = NULL, "
+            "duplicate_of_block_id = NULL, updated_at = ? WHERE id = ?",
+            [(to_disposition.value, timestamp, chunk_id) for chunk_id in chunk_ids],
+        )
+        await self.dao.db.commit()
+        await self.dao.write_event(
+            kind=EventKind.chunk_disposition,
+            actor="core.ledger",
+            payload={
+                "source": source_substring,
+                "from": from_disposition.value,
+                "to": to_disposition.value,
+                "count": len(chunk_ids),
+            },
+        )
+        return len(chunk_ids)
 
     async def export_json(self, workspace: str | Path, *, run_id: str, exported_at: str | None = None) -> Path:
         meta_dir = Path(workspace) / "wiki" / "_meta"
@@ -182,7 +256,12 @@ class ChunkLedger:
         if target not in allowed_transitions(source):
             raise InvalidDispositionTransition(f"{source.value} -> {target.value} is not allowed")
 
-        if target in {Disposition.failed, Disposition.failed_final, Disposition.irrelevant} and not reason:
+        if target in {
+            Disposition.failed,
+            Disposition.failed_final,
+            Disposition.irrelevant,
+            Disposition.exclusion_pending,
+        } and not reason:
             raise LedgerValidationError(f"{target.value} chunks require disposition_reason")
         attempts = int(current["attempts"]) + attempts_delta
         return await self.dao.update_chunk(
@@ -207,6 +286,7 @@ def allowed_transitions(source: Disposition) -> set[Disposition]:
             Disposition.placed,
             Disposition.duplicate,
             Disposition.irrelevant,
+            Disposition.exclusion_pending,
             Disposition.conflicted_pending,
             Disposition.failed,
             Disposition.failed_final,
@@ -216,4 +296,6 @@ def allowed_transitions(source: Disposition) -> set[Disposition]:
         return {Disposition.pending, Disposition.failed_final, Disposition.superseded}
     if source == Disposition.conflicted_pending:
         return {Disposition.placed, Disposition.duplicate, Disposition.superseded}
+    if source == Disposition.exclusion_pending:
+        return {Disposition.pending, Disposition.irrelevant, Disposition.superseded}
     return {Disposition.superseded}

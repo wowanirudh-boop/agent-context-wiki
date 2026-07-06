@@ -128,7 +128,7 @@ async def _page_sources(db: aiosqlite.Connection) -> dict[str, set[str]]:
 
     cursor = await db.execute(
         "SELECT page_id, candidate_json FROM acw_review_rows "
-        "WHERE applied_at IS NULL AND candidate_json IS NOT NULL",
+        "WHERE applied_at IS NULL AND candidate_json IS NOT NULL AND page_id IS NOT NULL",
     )
     for row in await fetch_all(cursor):
         source_id = _candidate_source_id(row["candidate_json"])
@@ -218,7 +218,8 @@ def _counts(rows: list[Row]) -> dict[str, int]:
         "irrelevant": sum(row["disposition"] == Disposition.irrelevant.value for row in active),
         "failed": sum(row["disposition"] in {Disposition.failed.value, Disposition.failed_final.value} for row in active),
         "pending_review": sum(
-            row["disposition"] in {Disposition.pending.value, Disposition.conflicted_pending.value}
+            row["disposition"]
+            in {Disposition.pending.value, Disposition.conflicted_pending.value, Disposition.exclusion_pending.value}
             for row in active
         ),
         "duplicate": sum(row["disposition"] == Disposition.duplicate.value for row in active),

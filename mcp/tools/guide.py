@@ -30,7 +30,8 @@ status still present in page markdown. `wiki_coverage(source)` shows ledger-deri
 When `ACW_LLM_PROVIDER=agent`, ACW v2 routes each structured reasoning request through MCP queue
 tools instead of a hosted LLM provider. Use this loop:
 1. Call `acw_next_request()`.
-2. If it returns a pending request, inspect `call_site`, `payload`, and `schema`.
+2. If it returns a pending request, inspect `call_site`, `instructions`, `payload`, and `schema`.
+   Follow the request's `instructions` field when producing the answer.
 3. Return a JSON object matching the call-site shape with `acw_answer_request(request_id, response_json)`.
 4. Repeat until `acw_next_request()` returns `no pending requests`.
 

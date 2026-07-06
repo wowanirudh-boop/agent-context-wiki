@@ -63,3 +63,7 @@ the PRD.
 - **2026-06-14 · M9 · The NFR-03 synthetic scale smoke marks generated chunks irrelevant by rule.**
   This keeps the test focused on 50-source/5,000-chunk ledger completion and failure accounting
   instead of measuring thousands of page insertions in the acceptance gate.
+- **2026-07-06 · additive · Bulk exclusion rows are source-level review rows with `page_id=NULL`.**
+  The checkpoint is about a source's irrelevant-chunk ratio rather than a page conflict; making
+  `page_id` nullable for `row_kind=exclusion` avoids inventing placeholder pages while preserving
+  DB-backed review-row identity.

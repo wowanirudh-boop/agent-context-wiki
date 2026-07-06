@@ -5,6 +5,17 @@ from dataclasses import dataclass, field
 
 from core.models import ReviewDecision, ReviewRowKind
 
+_STANDARD_REVIEW_DECISIONS = {
+    ReviewDecision.accept_new.value,
+    ReviewDecision.keep_existing.value,
+    ReviewDecision.merge.value,
+    ReviewDecision.mark_conflicted.value,
+    ReviewDecision.deprecate_existing.value,
+    ReviewDecision.reject_new.value,
+    ReviewDecision.delete_duplicate.value,
+    ReviewDecision.needs_more_info.value,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedReviewRow:
@@ -97,6 +108,16 @@ def _validate_decision(row_kind: str, decision: str | None) -> list[str]:
         ReviewDecision.needs_more_info.value,
     }:
         errors.append("taxonomy_merge rows only accept merge, reject_new, or needs_more_info")
+    elif row_kind == ReviewRowKind.exclusion.value and decision not in {
+        ReviewDecision.approve_exclusion.value,
+        ReviewDecision.reinstate.value,
+        ReviewDecision.needs_more_info.value,
+    }:
+        errors.append("exclusion rows only accept approve_exclusion, reinstate, or needs_more_info")
+    elif row_kind not in {ReviewRowKind.taxonomy_merge.value, ReviewRowKind.exclusion.value} and (
+        decision not in _STANDARD_REVIEW_DECISIONS
+    ):
+        errors.append(f"{row_kind} rows only accept standard review decisions")
     return errors
 
 

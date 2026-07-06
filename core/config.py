@@ -20,6 +20,7 @@ class ACWConfig:
     needs_review_stale_days: int = 14
     summary_max_words: int = 300
     batch_max_chunks: int = 8
+    exclusion_review_threshold: float = 0.5
 
 
 _ENV_TO_FIELD = {
@@ -33,9 +34,11 @@ _ENV_TO_FIELD = {
     "ACW_NEEDS_REVIEW_STALE_DAYS": "needs_review_stale_days",
     "ACW_SUMMARY_MAX_WORDS": "summary_max_words",
     "ACW_BATCH_MAX_CHUNKS": "batch_max_chunks",
+    "ACW_EXCLUSION_REVIEW_THRESHOLD": "exclusion_review_threshold",
 }
 _BOOL_FIELDS = {"auto_process"}
 _INT_FIELDS = {"max_attempts", "needs_review_stale_days", "summary_max_words", "batch_max_chunks"}
+_FLOAT_FIELDS = {"exclusion_review_threshold"}
 
 
 def load_config(workspace: str | Path | None = None, environ: Mapping[str, str] | None = None) -> ACWConfig:
@@ -77,4 +80,6 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
     if field_name in _INT_FIELDS:
         return int(value)
+    if field_name in _FLOAT_FIELDS:
+        return float(value)
     return value

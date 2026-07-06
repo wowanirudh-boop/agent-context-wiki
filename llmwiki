@@ -9,7 +9,9 @@ Usage:
     llmwiki mcp-config <workspace>   Print claude_desktop_config.json snippet
     llmwiki reindex <workspace>      Force full rebuild of index.db
     llmwiki process <workspace>      Run the v2 placement pipeline
+    llmwiki reset-dispositions <workspace> --source <path-substring> --from <disposition> --to pending
     llmwiki apply-decisions <workspace> [review_file]
+    llmwiki import-decisions <workspace> <csv_path>
     llmwiki lint <workspace> [--json]
     llmwiki eval <workspace> [--json] [--update-baseline]
     llmwiki merge-pages <workspace> <source_page> <target_page>
@@ -334,6 +336,57 @@ def cmd_apply_decisions(workspace: str, review_file: str | None = None) -> None:
     print(f"  committed: {result.committed}")
 
 
+def cmd_reset_dispositions(
+    workspace: str,
+    *,
+    source: str,
+    from_disposition: str,
+    to_disposition: str,
+) -> None:
+    ws = Path(workspace).resolve()
+    db_path = ws / ".llmwiki" / "index.db"
+    if not db_path.exists():
+        print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
+        sys.exit(1)
+    _apply_acw_migrations(ws)
+
+    import aiosqlite
+
+    from core.db.dao import ACWDao
+    from core.ledger import ChunkLedger
+    from core.lock import WorkspaceLock
+    from core.models import Disposition
+
+    async def _run() -> int:
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            return await ChunkLedger(ACWDao(db)).reset_dispositions(
+                source_substring=source,
+                from_disposition=Disposition(from_disposition),
+                to_disposition=Disposition(to_disposition),
+            )
+
+    with WorkspaceLock(ws, "reset-dispositions"):
+        count = asyncio.run(_run())
+    print(f"OK Reset dispositions: {ws}")
+    print(f"  reset_chunks: {count}")
+
+
+def cmd_import_decisions(workspace: str, csv_path: str) -> None:
+    ws = Path(workspace).resolve()
+    db_path = ws / ".llmwiki" / "index.db"
+    if not db_path.exists():
+        print(f"No index found. Run: llmwiki init {ws}", file=sys.stderr)
+        sys.exit(1)
+    _apply_acw_migrations(ws)
+
+    from core.review.csv_io import import_decisions_from_csv
+
+    result = import_decisions_from_csv(ws, Path(csv_path) if Path(csv_path).is_absolute() else ws / csv_path)
+    print(f"OK Imported decisions: {result.review_path}")
+    print(f"  updated_rows: {result.updated_rows}")
+
+
 def cmd_lint(workspace: str, *, json_output: bool = False) -> int:
     ws = Path(workspace).resolve()
     db_path = ws / ".llmwiki" / "index.db"
@@ -489,9 +542,19 @@ def main():
     p_process = sub.add_parser("process", help="Run the v2 placement pipeline")
     p_process.add_argument("workspace", help="Path to workspace folder")
 
+    p_reset = sub.add_parser("reset-dispositions", help="Reset matching v2 chunk ledger dispositions to pending")
+    p_reset.add_argument("workspace", help="Path to workspace folder")
+    p_reset.add_argument("--source", required=True, help="Source path substring to match")
+    p_reset.add_argument("--from", dest="from_disposition", required=True, help="Disposition to reset from")
+    p_reset.add_argument("--to", dest="to_disposition", required=True, choices=["pending"], help="Reset target")
+
     p_apply = sub.add_parser("apply-decisions", help="Apply v2 review decisions")
     p_apply.add_argument("workspace", help="Path to workspace folder")
     p_apply.add_argument("review_file", nargs="?", help="Review file path; defaults to unresolved review files")
+
+    p_import = sub.add_parser("import-decisions", help="Import v2 review decisions from a CSV companion")
+    p_import.add_argument("workspace", help="Path to workspace folder")
+    p_import.add_argument("csv_path", help="CSV companion path")
 
     p_lint = sub.add_parser("lint", help="Run v2 invariant lint")
     p_lint.add_argument("workspace", help="Path to workspace folder")
@@ -546,8 +609,17 @@ def main():
         cmd_reindex(args.workspace)
     elif args.command == "process":
         cmd_process(args.workspace)
+    elif args.command == "reset-dispositions":
+        cmd_reset_dispositions(
+            args.workspace,
+            source=args.source,
+            from_disposition=args.from_disposition,
+            to_disposition=args.to_disposition,
+        )
     elif args.command == "apply-decisions":
         cmd_apply_decisions(args.workspace, getattr(args, "review_file", None))
+    elif args.command == "import-decisions":
+        cmd_import_decisions(args.workspace, args.csv_path)
     elif args.command == "lint":
         sys.exit(cmd_lint(args.workspace, json_output=getattr(args, "json", False)))
     elif args.command == "eval":
