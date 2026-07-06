@@ -45,6 +45,7 @@ Per-call-site response shapes:
 - C4 merge draft: `{"content":"...","excerpt_policy":"keep_both"}`
 - C5 summary: `{"summary_markdown":"..."}`
 - C6 transcript pre-pass: `{"segments":[{"chunk_id":"ch_...","relevant":true,"reason":null,"superseded_by_chunk_id":null,"key_hint":null,"source_date_extracted":null}]}`
+- C7 domain hint: `{"domain_hint_markdown":"# Workspace Domain Hint\n..."}`
 
 ## Reading Images
 

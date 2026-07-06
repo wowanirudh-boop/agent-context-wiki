@@ -1,6 +1,6 @@
 # 03 — LLM Interfaces (Normative)
 
-LLM calls happen **only** at these six call sites, all routed through
+LLM calls happen **only** at these seven call sites, all routed through
 `core/llm/provider.py::LLMProvider.complete_structured(call_site, payload, schema)`.
 Every call: structured JSON output enforced against the schema below (provider-native
 structured outputs when available, else JSON-mode + local validation); on validation failure
@@ -78,6 +78,17 @@ Code applies: irrelevant → `irrelevant`; superseded → `duplicate` of the sur
 block with reason `intra_transcript_supersession`; extracted date → `acw_source_versions.source_date`
 (origin `content`). Surviving segments proceed to C1 with `type` defaulting to
 `decision`/`note` (FR-TRANS-02).
+
+## C7 - Domain hint generation
+
+Runs before placement only when `<workspace>/.llmwiki/domain_hint.md` is absent.
+
+Input payload: up to 30 sources, each with `source_path`, `kind`, and 2-3
+`sample_chunk_texts`, plus current registry page titles/descriptions.
+
+Output: `{"domain_hint_markdown":"..."}`. The validator requires non-empty markdown. Code writes
+the markdown to `.llmwiki/domain_hint.md` with a generated-content marker, and later placement
+calls read that file through the same `workspace_domain_hint` field used for user-authored hints.
 
 ## FakeLLM (tests)
 

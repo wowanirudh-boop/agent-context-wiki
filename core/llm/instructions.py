@@ -2,11 +2,12 @@ from __future__ import annotations
 
 INSTRUCTIONS: dict[str, str] = {
     "C1": (
-        "Classify and place source chunks into source-backed context blocks. Relevance is judged "
-        "against the workspace domains described in workspace_domain_hint. The structured/tabular "
-        "reference data (tables, directories, row-level data) is in scope and should be placed "
-        "(e.g., as fact/term blocks on reference pages), NOT marked irrelevant. Marking a chunk "
-        "irrelevant requires a specific per-chunk reason. When uncertain, prefer relevant."
+        "Classify and place source chunks into source-backed context blocks with an inclusion "
+        "default: content is placed unless there is a specific exclusion reason such as "
+        "extraction garbage, boilerplate, or navigation debris. 'not typical wiki prose' and "
+        "'tabular/row-level data' are NOT valid exclusion reasons. Every irrelevant verdict "
+        "requires a concrete per-chunk reason. The domain hint is context for organizing "
+        "placements, not a relevance gate."
     ),
     "C2": (
         "Convert the supplied structured flow definition into Mermaid while preserving every "
@@ -30,5 +31,10 @@ INSTRUCTIONS: dict[str, str] = {
         "Classify ordered transcript segments for relevance, identify later segments that "
         "supersede earlier statements on the same key, and extract a source date only when it "
         "is explicit in the transcript text."
+    ),
+    "C7": (
+        "Generate concise workspace domain hint markdown from the sampled sources and current "
+        "registry titles/descriptions. Return JSON with a non-empty domain_hint_markdown string "
+        "that helps future placement organize content without excluding content by domain."
     ),
 }

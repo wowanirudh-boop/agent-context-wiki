@@ -100,16 +100,18 @@ async def test_fr_place_08_reset_dispositions_cli_resets_matching_source_batches
     }
 
 
-def test_c1_c6_instructions_are_provider_and_queue_visible(tmp_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_c1_c7_instructions_are_provider_and_queue_visible(tmp_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core.config import ACWConfig
     from core.llm.agent_provider import AgentQueue
     from core.llm.instructions import INSTRUCTIONS
     from core.llm.provider import OpenAIProvider
 
-    assert set(INSTRUCTIONS) == {"C1", "C2", "C3", "C4", "C5", "C6"}
-    assert "workspace_domain_hint" in INSTRUCTIONS["C1"]
-    assert "structured/tabular reference data" in INSTRUCTIONS["C1"]
-    assert "prefer relevant" in INSTRUCTIONS["C1"]
+    assert set(INSTRUCTIONS) == {"C1", "C2", "C3", "C4", "C5", "C6", "C7"}
+    assert "content is placed unless there is a specific exclusion reason" in INSTRUCTIONS["C1"]
+    assert "not typical wiki prose" in INSTRUCTIONS["C1"]
+    assert "tabular/row-level data" in INSTRUCTIONS["C1"]
+    assert "not a relevance gate" in INSTRUCTIONS["C1"]
+    assert "domain_hint_markdown" in INSTRUCTIONS["C7"]
 
     recorded: dict[str, Any] = {}
 
@@ -140,11 +142,66 @@ def test_c1_c6_instructions_are_provider_and_queue_visible(tmp_workspace: Path, 
     assert recorded["input"][1]["role"] == "user"
 
     request = AgentQueue(tmp_workspace).create_request(
-        call_site="C1",
-        payload={"chunks": []},
+        call_site="C7",
+        payload={"sources": [], "registry": []},
         schema={"type": "object"},
     )
-    assert request["instructions"] == INSTRUCTIONS["C1"]
+    assert request["instructions"] == INSTRUCTIONS["C7"]
+
+
+@pytest.mark.asyncio
+async def test_c7_domain_hint_is_generated_when_absent_before_placement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.db.dao import ACWDao
+    from core.db.migrate import apply_migrations
+    from core.pipeline.run import run_processing_run
+    from core.registry import PageRegistry
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "docs" / "refund_policy.md"
+    source.parent.mkdir()
+    source.write_text(
+        "Refund operations require supervisors to approve returns within 30 days for warranty-backed orders. "
+        "Support agents use this policy when deciding whether a case should be escalated, refunded, "
+        "or routed back to the merchant team. The policy includes structured decision data that "
+        "should remain available to downstream testing and RCA agents.",
+        encoding="utf-8",
+    )
+    module = _load_llmwiki_module()
+    monkeypatch.setenv("ACW_LLM_PROVIDER", "fake-rules")
+    await asyncio.to_thread(module.cmd_init, str(workspace))
+    await asyncio.to_thread(module.cmd_reindex, str(workspace))
+    async with aiosqlite.connect(workspace / ".llmwiki" / "index.db") as db:
+        await apply_migrations(db)
+        await PageRegistry(ACWDao(db)).create_page(
+            title="Refunds",
+            path="wiki/refunds.md",
+            description="Refund policy and support operations.",
+            domain="support",
+        )
+    fake = FakeLLM.rule_based()
+
+    await run_processing_run(workspace, provider=fake)
+
+    hint_path = workspace / ".llmwiki" / "domain_hint.md"
+    hint_text = hint_path.read_text(encoding="utf-8")
+    call_sites = [call.call_site for call in fake.calls]
+    c7_call = next(call for call in fake.calls if call.call_site == "C7")
+    c1_calls = [call for call in fake.calls if call.call_site == "C1"]
+
+    assert hint_text.startswith("<!-- acw:generated Domain Hint")
+    assert "docs/refund_policy.md" in hint_text
+    assert c7_call.payload["sources"][0]["source_path"] == "docs/refund_policy.md"
+    assert len(c7_call.payload["sources"][0]["sample_chunk_texts"]) <= 3
+    assert c7_call.payload["registry"] == [
+        {"title": "Refunds", "description": "Refund policy and support operations."}
+    ]
+    assert c1_calls
+    assert call_sites.index("C7") < call_sites.index("C1")
+    assert {call.payload["workspace_domain_hint"] for call in c1_calls} == {hint_text}
 
 
 @pytest.mark.asyncio
@@ -178,6 +235,10 @@ async def test_domain_hint_file_is_read_once_per_run_and_sent_to_c1(
 
     await run_processing_run(workspace, provider=fake)
 
+    assert (workspace / ".llmwiki" / "domain_hint.md").read_text(encoding="utf-8") == (
+        "Refund operations, support RCA, and structured product reference tables."
+    )
+    assert [call.call_site for call in fake.calls].count("C7") == 0
     c1_calls = [call for call in fake.calls if call.call_site == "C1"]
     assert c1_calls
     assert {call.payload["workspace_domain_hint"] for call in c1_calls} == {

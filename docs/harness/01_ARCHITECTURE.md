@@ -76,7 +76,7 @@ core/
     harness.py         # golden-QA runner over wiki_* tools only (§12.6)
   llm/
     provider.py        # LLMProvider protocol; OpenAIProvider; structured-output enforcement
-    calls.py           # the six call sites (03_LLM_INTERFACES), prompt templates live here
+    calls.py           # permitted call sites (03_LLM_INTERFACES), prompt templates live here
   mcp_tools.py         # wiki_index/wiki_summary/wiki_page/wiki_search registration helpers
 ```
 

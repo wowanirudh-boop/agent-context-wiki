@@ -51,6 +51,8 @@ class FakeLLM(LLMProvider):
 
         if self.mode == "scripted":
             key = (call_site, fingerprint)
+            if call_site == "C7" and key not in self._responses:
+                return _rule_based_domain_hint(payload)
             if key not in self._responses:
                 raise KeyError(f"No scripted FakeLLM response for {call_site} {fingerprint}")
             return copy.deepcopy(dict(self._responses[key]))
@@ -87,6 +89,8 @@ def _rule_based_response(call_site: str, payload: StructuredPayload) -> Structur
         return {"summary_markdown": _summary(payload)}
     if call_site == "C6":
         return {"segments": _transcript_segments(_as_list(payload.get("segments", [])))}
+    if call_site == "C7":
+        return _rule_based_domain_hint(payload)
     return {}
 
 
@@ -368,6 +372,21 @@ def _summary(payload: StructuredPayload) -> str:
         if isinstance(block, Mapping):
             words.extend(str(block.get("content", "")).split())
     return " ".join(words[:300])
+
+
+def _rule_based_domain_hint(payload: StructuredPayload) -> StructuredResponse:
+    sources = [source for source in _as_list(payload.get("sources", [])) if isinstance(source, Mapping)]
+    registry = [page for page in _as_list(payload.get("registry", [])) if isinstance(page, Mapping)]
+    lines = ["# Workspace Domain Hint", ""]
+    if sources:
+        names = ", ".join(str(source.get("source_path", "")).strip() for source in sources if source.get("source_path"))
+        lines.append(f"Sources: {names}.")
+    else:
+        lines.append("Sources: local workspace.")
+    if registry:
+        titles = ", ".join(str(page.get("title", "")).strip() for page in registry if page.get("title"))
+        lines.append(f"Registry pages: {titles}.")
+    return {"domain_hint_markdown": "\n".join(line for line in lines if line).strip()}
 
 
 def _excerpt(text: str) -> str:

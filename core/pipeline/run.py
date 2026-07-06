@@ -15,10 +15,12 @@ from core.ledger import ChunkLedger
 from core.llm.calls import (
     C1_SCHEMA,
     C6_SCHEMA,
+    C7_SCHEMA,
     CallValidationError,
     complete_validated,
     validate_c1_response,
     validate_c6_response,
+    validate_c7_response,
 )
 from core.llm.provider import LLMProvider, provider_from_config
 from core.lock import WorkspaceLock
@@ -105,6 +107,7 @@ async def _run_processing_run_locked(
                     await ledger.mark_pending_for_retry(str(chunk["id"]))
 
             worklist = await _worklist(db, max_attempts=cfg.max_attempts)
+            await _ensure_domain_hint(ws, registry, llm, worklist, run_id=run_id)
             had_work = bool(worklist)
             domain_hint = _workspace_domain_hint(ws)
             for source_rows in _source_groups(worklist):
@@ -392,6 +395,64 @@ def _workspace_domain_hint(workspace: Path) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     return "local workspace"
+
+
+async def _ensure_domain_hint(
+    workspace: Path,
+    registry: PageRegistry,
+    provider: LLMProvider,
+    worklist: list[Row],
+    *,
+    run_id: str,
+) -> None:
+    path = workspace / ".llmwiki" / "domain_hint.md"
+    if path.exists():
+        return
+    payload = {
+        "sources": _domain_hint_sources(worklist),
+        "registry": _domain_hint_registry(await registry.list_pages()),
+    }
+    response = await complete_validated(provider, "C7", payload, C7_SCHEMA, validate_c7_response)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = (
+        f"<!-- acw:generated Domain Hint run={run_id} -- manual edits will be preserved -->\n"
+        f"{str(response['domain_hint_markdown']).strip()}\n"
+    )
+    path.write_text(text, encoding="utf-8")
+
+
+def _domain_hint_sources(rows: list[Row]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in _source_groups(rows):
+        if len(sources) >= 30:
+            break
+        first = group[0]
+        source_path = str(first["source_path"])
+        if source_path in seen:
+            continue
+        seen.add(source_path)
+        samples = [
+            str(row.get("text") or "").strip()
+            for row in group
+            if str(row.get("text") or "").strip()
+        ][:3]
+        sources.append(
+            {
+                "source_path": source_path,
+                "kind": str(first.get("source_kind") or "doc"),
+                "sample_chunk_texts": samples,
+            }
+        )
+    return sources
+
+
+def _domain_hint_registry(pages: list[Row]) -> list[dict[str, str]]:
+    return [
+        {"title": str(page["title"]), "description": str(page["description"] or "")}
+        for page in pages
+        if page["status"] == "active"
+    ]
 
 
 def _source_groups(rows: list[Row]) -> list[list[Row]]:

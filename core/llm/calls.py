@@ -15,6 +15,7 @@ C3_CONFLICT_TEMPLATE = "Judge whether a candidate context block duplicates or co
 C4_MERGE_TEMPLATE = "Draft a merged context block candidate from two conflicting blocks."
 C5_SUMMARY_TEMPLATE = "Summarize the current context blocks on a page for bounded agent reads."
 C6_TRANSCRIPT_TEMPLATE = "Classify transcript segments and mark intra-transcript supersession."
+C7_DOMAIN_HINT_TEMPLATE = "Generate a concise workspace domain hint from sampled sources and registry entries."
 
 C1_SCHEMA: StructuredSchema = {"type": "object", "required": ["chunks"]}
 C2_SCHEMA: StructuredSchema = {"type": "object", "required": ["mermaid", "nodes", "edges"]}
@@ -22,6 +23,7 @@ C3_SCHEMA: StructuredSchema = {"type": "object", "required": ["verdict", "confli
 C4_SCHEMA: StructuredSchema = {"type": "object", "required": ["content", "excerpt_policy"]}
 C5_SCHEMA: StructuredSchema = {"type": "object", "required": ["summary_markdown"]}
 C6_SCHEMA: StructuredSchema = {"type": "object", "required": ["segments"]}
+C7_SCHEMA: StructuredSchema = {"type": "object", "required": ["domain_hint_markdown"]}
 
 _C3_RECOMMENDATIONS = {
     ReviewDecision.accept_new.value,
@@ -161,6 +163,15 @@ def validate_c6_response(payload: StructuredPayload, response: StructuredRespons
             raise CallValidationError(f"Unknown superseded_by_chunk_id: {superseded_by}")
         _nullable_string(segment, "key_hint")
         _nullable_string(segment, "source_date_extracted")
+    return response
+
+
+def validate_c7_response(payload: StructuredPayload, response: StructuredResponse) -> StructuredResponse:
+    del payload
+    hint = _string(response, "domain_hint_markdown").strip()
+    if not hint:
+        raise CallValidationError("C7 domain_hint_markdown is required")
+    response["domain_hint_markdown"] = hint
     return response
 
 

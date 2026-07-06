@@ -11,7 +11,7 @@ build Agent Context Wiki v2 on a fork of `llm-wiki` with minimal human steering.
 | `docs/PRD.md` | Product requirements (FR-IDs) | Yes |
 | `01_ARCHITECTURE.md` | Module map, data flow, FR traceability | Yes |
 | `02_DATA_CONTRACTS.md` | SQLite DDL, block grammar, review-file format, JSON exports, MCP tool I/O | Yes — single source of truth for every schema |
-| `03_LLM_INTERFACES.md` | The 6 permitted LLM call sites, payloads, output JSON schemas, validation/retry | Yes |
+| `03_LLM_INTERFACES.md` | The permitted LLM call sites, payloads, output JSON schemas, validation/retry | Yes |
 | `04_TDD_PLAN.md` | Test inventory per FR, fixtures, FakeLLM, golden workspaces | Yes (process) |
 | `05_BUILD_PLAN.md` | Phases M0–M9, each with scope, tests-first list, Definition of Done | Yes (sequence) |
 | `06_CODEX_PROMPTS.md` | The exact prompts the human pastes into Codex, one per phase | Operational |
