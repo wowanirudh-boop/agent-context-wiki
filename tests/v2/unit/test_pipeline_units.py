@@ -3,6 +3,20 @@ from __future__ import annotations
 import pytest
 
 
+def test_fr_block_05_long_excerpt_keeps_values_in_middle() -> None:
+    from core.pipeline.placement import _excerpt_for_block
+
+    source = "context " * 120 + " timeout=73001 " + "context " * 120
+    assert _excerpt_for_block(source) == source
+
+
+def test_fr_ledger_01_short_tail_is_not_dropped_after_large_paragraph() -> None:
+    from core.ingest import _chunk_text
+
+    chunks = _chunk_text("Long paragraph. " * 150 + "\n\nFinal limit: 7.")
+    assert any("Final limit: 7." in chunk.content for chunk in chunks)
+
+
 def test_fr_place_07_batches_pending_chunks_by_source_and_max_size() -> None:
     from core.pipeline.batching import batch_chunks_by_source
 

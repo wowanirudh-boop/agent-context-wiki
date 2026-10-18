@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from core.blocks.model import CANONICAL_SECTIONS
+from core.blocks.serializer import PageWriteConflict
 from core.config import ACWConfig, load_config
 from core.coverage import render_coverage_sections
 from core.db.dao import ACWDao, Row, json_dumps
@@ -27,11 +30,17 @@ from core.lock import WorkspaceLock
 from core.models import EventKind, RunStatus
 from core.pipeline.batching import batch_chunks_by_source
 from core.pipeline.flows import extract_flow_mermaid
-from core.pipeline.placement import PlacementWriter, placement_registry_payload
-from core.pipeline.transcripts import apply_transcript_prepass, resolve_transcript_duplicate_placeholders
+from core.pipeline.placement import PlacementOutcome, PlacementWriter, placement_registry_payload
+from core.pipeline.transcripts import (
+    apply_transcript_prepass,
+    resolve_transcript_duplicate_placeholders,
+    settle_transcript_supersession,
+)
 from core.registry import PageRegistry
 from core.review.emit import create_taxonomy_merge_review_rows, emit_review_file, find_unresolved_review_files
 from core.summary import render_summaries_and_index
+
+logger = logging.getLogger("acw.pipeline.run")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +89,9 @@ async def _run_processing_run_locked(
         run_id = str(run["id"])
         await dao.write_event(kind=EventKind.run_started, actor="core.pipeline.run", payload={"run_id": run_id})
         user_edited_blocks = await mark_user_edited_blocks(ws, db)
+        from core.reingest import create_stale_block_reviews, sync_block_statuses
+
+        await sync_block_statuses(ws, db)
         llm = provider or provider_from_config(ws, dao=dao)
         ledger = ChunkLedger(dao, max_attempts=cfg.max_attempts)
         registry = PageRegistry(dao)
@@ -100,6 +112,9 @@ async def _run_processing_run_locked(
         }
         calls_before = _provider_call_count(llm)
         try:
+            from core.ingest import extract_pending_sources
+
+            await extract_pending_sources(db, ws, max_attempts=cfg.max_attempts)
             await _mark_out_of_scope_chunks(db, ledger)
             worklist = await _worklist(db, max_attempts=cfg.max_attempts)
             for chunk in worklist:
@@ -112,17 +127,12 @@ async def _run_processing_run_locked(
             domain_hint = _workspace_domain_hint(ws)
             for source_rows in _source_groups(worklist):
                 deferred_irrelevant: list[_IrrelevantCandidate] = []
-                for batch in batch_chunks_by_source(source_rows, max_chunks=cfg.batch_max_chunks):
-                    processed = await _process_batch(
-                        db,
-                        ledger,
-                        registry,
-                        writer,
-                        llm,
-                        batch,
-                        ws,
-                        domain_hint=domain_hint,
-                        deferred_irrelevant=deferred_irrelevant,
+                batch_size = len(source_rows) if source_rows[0]["source_kind"] in {"flow", "transcript"} else cfg.batch_max_chunks
+                for batch in batch_chunks_by_source(source_rows, max_chunks=batch_size):
+                    processed = await _process_batch_tracked(
+                        db, ledger, registry, writer, llm, batch, ws,
+                        domain_hint=domain_hint, deferred_irrelevant=deferred_irrelevant,
+                        batch_max_chunks=cfg.batch_max_chunks,
                     )
                     for key, value in processed.items():
                         stats[key] = int(stats.get(key, 0)) + value
@@ -137,11 +147,13 @@ async def _run_processing_run_locked(
                 for key, value in processed.items():
                     stats[key] = int(stats.get(key, 0)) + value
 
+            await settle_transcript_supersession(db)
             if had_work:
                 await create_taxonomy_merge_review_rows(db, run_id)
-                review_path = await emit_review_file(ws, db, run_id)
-                if review_path is not None:
-                    stats["review_file"] = review_path.relative_to(ws).as_posix()
+            await create_stale_block_reviews(ws, db, run_id)
+            review_path = await emit_review_file(ws, db, run_id)
+            if review_path is not None:
+                stats["review_file"] = review_path.relative_to(ws).as_posix()
             pending = await _pending_count(db)
             stats["pending"] = pending
             stats["blocks_created"] = writer.blocks_created
@@ -179,6 +191,39 @@ async def _run_processing_run_locked(
             raise
 
 
+async def _process_batch_tracked(
+    db: aiosqlite.Connection,
+    ledger: ChunkLedger,
+    registry: PageRegistry,
+    writer: PlacementWriter,
+    provider: LLMProvider,
+    batch: list[Row],
+    workspace: Path,
+    *,
+    domain_hint: str | None,
+    deferred_irrelevant: list[_IrrelevantCandidate],
+    batch_max_chunks: int = 8,
+) -> dict[str, int]:
+    try:
+        return await _process_batch(
+            db, ledger, registry, writer, provider, batch, workspace,
+            domain_hint=domain_hint, deferred_irrelevant=deferred_irrelevant,
+            batch_max_chunks=batch_max_chunks,
+        )
+    except PageWriteConflict:
+        # FR-LOCK-03: preserve pending work for the next run.
+        return {}
+    except Exception as exc:
+        logger.exception("Model batch failed; recording affected chunks in the ledger")
+        failed = 0
+        for chunk in batch:
+            current = await ledger.dao.get_chunk(str(chunk["id"]))
+            if current is not None and current["disposition"] == "pending":
+                await ledger.mark_failed(str(chunk["id"]), reason=str(exc) or type(exc).__name__)
+                failed += 1
+        return {"failed": failed}
+
+
 async def _process_batch(
     db: aiosqlite.Connection,
     ledger: ChunkLedger,
@@ -190,14 +235,15 @@ async def _process_batch(
     *,
     domain_hint: str | None = None,
     deferred_irrelevant: list[_IrrelevantCandidate] | None = None,
+    batch_max_chunks: int = 8,
+    transcript_preprocessed: bool = False,
 ) -> dict[str, int]:
-    del workspace
     if not batch:
         return {}
-    if all(chunk["source_kind"] == "transcript" for chunk in batch):
-        batch = await _preprocess_transcript_batch(db, ledger, provider, batch)
-        if not batch:
-            return {"irrelevant": 0, "placed": 0, "duplicate": 0, "conflicted_pending": 0, "failed": 0}
+    if not transcript_preprocessed and all(chunk["source_kind"] == "transcript" for chunk in batch):
+        survivors = await _preprocess_transcript_batch(db, ledger, provider, batch)
+        return await _place_transcript_survivors(db, ledger, registry, writer, provider, survivors, workspace,
+                                               domain_hint=domain_hint, batch_max_chunks=batch_max_chunks)
 
     if all(chunk["source_kind"] == "flow" for chunk in batch):
         return await _process_flow_batch(ledger, writer, provider, batch)
@@ -207,6 +253,7 @@ async def _process_batch(
         "chunks": [_chunk_payload(chunk) for chunk in batch],
         "registry": placement_registry_payload(await registry.list_pages()),
         "page_context": await writer.page_context_payload(),
+        "canonical_sections": list(CANONICAL_SECTIONS),
     }
     response = await complete_validated(provider, "C1", payload, C1_SCHEMA, validate_c1_response)
     counts = {"placed": 0, "duplicate": 0, "conflicted_pending": 0, "irrelevant": 0, "failed": 0}
@@ -223,12 +270,15 @@ async def _process_batch(
                 )
             continue
         try:
+            outcomes = []
             for placement in item["placements"]:
                 outcome = await writer.write_candidate(
                     chunk,
                     placement,
                     default_transcript_type=chunk["source_kind"] == "transcript",
+                    record_disposition=False,
                 )
+                outcomes.append(outcome)
                 counts[outcome.kind] += 1
                 if outcome.kind == "placed" and outcome.block_id is not None:
                     await resolve_transcript_duplicate_placeholders(
@@ -236,10 +286,37 @@ async def _process_batch(
                         survivor_chunk_id=str(chunk["id"]),
                         block_id=outcome.block_id,
                     )
+            await _record_placement_outcomes(ledger, str(chunk["id"]), outcomes)
+        except PageWriteConflict:
+            raise
         except (CallValidationError, KeyError, RuntimeError, ValueError) as exc:
             await ledger.mark_failed(str(chunk["id"]), reason=str(exc))
             counts["failed"] += 1
     return counts
+
+
+async def _place_transcript_survivors(
+    db: aiosqlite.Connection, ledger: ChunkLedger, registry: PageRegistry, writer: PlacementWriter,
+    provider: LLMProvider, survivors: list[Row], workspace: Path, *, domain_hint: str | None, batch_max_chunks: int,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for batch in batch_chunks_by_source(survivors, max_chunks=batch_max_chunks):
+        processed = await _process_batch(db, ledger, registry, writer, provider, batch, workspace,
+                                         domain_hint=domain_hint, transcript_preprocessed=True)
+        for key, value in processed.items():
+            counts[key] = counts.get(key, 0) + value
+    return counts
+
+
+async def _record_placement_outcomes(ledger: ChunkLedger, chunk_id: str, outcomes: list[PlacementOutcome]) -> None:
+    if any(outcome.kind == "conflicted_pending" for outcome in outcomes):
+        conflict = next(outcome for outcome in outcomes if outcome.kind == "conflicted_pending")
+        row = await ledger.dao.get_review_row(str(conflict.review_row_id))
+        await ledger.mark_conflicted_pending(chunk_id, reason=str(row["conflict_type"] or "ambiguous_update"))
+    elif any(outcome.kind == "placed" for outcome in outcomes):
+        await ledger.mark_placed(chunk_id, block_ids=[o.block_id for o in outcomes if o.kind == "placed" and o.block_id])
+    else:
+        await ledger.mark_duplicate(chunk_id, duplicate_of_block_id=str(outcomes[0].block_id), reason="duplicate")
 
 
 async def _preprocess_transcript_batch(
@@ -260,41 +337,42 @@ async def _process_flow_batch(
     batch: list[Row],
 ) -> dict[str, int]:
     counts = {"placed": 0, "duplicate": 0, "conflicted_pending": 0, "irrelevant": 0, "failed": 0}
-    for chunk in batch:
-        try:
-            mermaid = await extract_flow_mermaid(provider, str(chunk["text"]), source_path=str(chunk["source_path"]))
-            target_page = _flow_target_page(
-                await writer.registry.list_pages(),
-                source_path=str(chunk["source_path"]),
-                source_text=str(chunk["text"]),
-            )
-            placement = {
-                "page": {"existing_page_id": target_page["id"]} if target_page is not None else None,
-                "new_page": None
-                if target_page is not None
-                else {
-                    "title": _title_from_path(str(chunk["source_path"])),
-                    "description": "Flow structure",
-                    "domain": "flows",
-                    "path_slug": _slug_from_path(str(chunk["source_path"])),
-                    "no_registry_match_assertion": "Flow files create a dedicated flow page when no registry match exists.",
-                },
-                "section": "Flow",
-                "block": {
-                    "key": f"{_key_prefix_from_path(str(chunk['source_path']))}.flow",
-                    "type": "flow",
-                    "content": f"```mermaid\n{mermaid}\n```",
-                    "excerpt": str(chunk["text"]),
-                    "new_key_justification": "Flow source creates its structural key.",
-                },
-                "links": [],
-            }
-            outcome = await writer.write_candidate(chunk, placement)
+    cursor = await writer.db.execute("SELECT content FROM documents WHERE id = ?", (batch[0]["source_id"],))
+    source_text = (await cursor.fetchone())[0]
+    chunk = {**batch[0], "text": source_text, "chunk_ids": [str(row["id"]) for row in batch]}
+    try:
+        outcome = await _write_flow(writer, provider, chunk)
+        for row in batch:
+            await _record_placement_outcomes(ledger, str(row["id"]), [outcome])
             counts[outcome.kind] += 1
-        except (CallValidationError, ValueError) as exc:
-            await ledger.mark_failed(str(chunk["id"]), reason=str(exc))
+    except (CallValidationError, ValueError) as exc:
+        for row in batch:
+            await ledger.mark_failed(str(row["id"]), reason=str(exc))
             counts["failed"] += 1
     return counts
+
+
+async def _write_flow(writer: PlacementWriter, provider: LLMProvider, chunk: Row) -> PlacementOutcome:
+    mermaid = await extract_flow_mermaid(provider, str(chunk["text"]), source_path=str(chunk["source_path"]))
+    target_page = _flow_target_page(
+        await writer.registry.list_pages(), source_path=str(chunk["source_path"]), source_text=str(chunk["text"]),
+    )
+    placement = {
+        "page": {"existing_page_id": target_page["id"]} if target_page is not None else None,
+        "new_page": None if target_page is not None else {
+            "title": _title_from_path(str(chunk["source_path"])), "description": "Flow structure", "domain": "flows",
+            "path_slug": _slug_from_path(str(chunk["source_path"])),
+            "no_registry_match_assertion": "Flow files create a dedicated flow page when no registry match exists.",
+        },
+        "section": "Flow",
+        "block": {
+            "key": f"{_key_prefix_from_path(str(chunk['source_path']))}.flow", "type": "flow",
+            "content": f"```mermaid\n{mermaid}\n```", "excerpt": str(chunk["text"]),
+            "new_key_justification": "Flow source creates its structural key.",
+        },
+        "links": [],
+    }
+    return await writer.write_candidate(chunk, placement, record_disposition=False)
 
 
 async def _worklist(db: aiosqlite.Connection, *, max_attempts: int) -> list[Row]:
@@ -305,7 +383,7 @@ async def _worklist(db: aiosqlite.Connection, *, max_attempts: int) -> list[Row]
         "COALESCE(sv.source_date, 'unknown') AS source_date "
         "FROM acw_chunk_ledger cl "
         "JOIN documents d ON d.id = cl.source_id "
-        "LEFT JOIN document_chunks dc ON dc.id = cl.document_chunk_id "
+        "JOIN document_chunks dc ON dc.id = cl.document_chunk_id "
         "LEFT JOIN acw_source_versions sv ON sv.id = cl.source_version_id "
         "WHERE d.source_kind = 'source' AND d.relative_path NOT LIKE 'eval/%' "
         "AND d.relative_path NOT LIKE 'wiki/%' AND d.relative_path NOT LIKE '.llmwiki/%' "

@@ -7,12 +7,28 @@ import json
 import sys
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "mcp"))
-
 TEST_USER_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+@pytest.fixture(autouse=True)
+def mcp_imports(monkeypatch):
+    """The API and MCP are separate processes with overlapping module names."""
+    roots = {"auth", "config", "db", "services", "tools", "vaultfs"}
+    saved = {name: module for name, module in sys.modules.copy().items() if name.split(".")[0] in roots}
+    for name in saved:
+        del sys.modules[name]
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3] / "mcp"))
+    try:
+        yield
+    finally:
+        for name in list(sys.modules):
+            if name.split(".")[0] in roots:
+                del sys.modules[name]
+        sys.modules.update(saved)
 
 
 @pytest.fixture

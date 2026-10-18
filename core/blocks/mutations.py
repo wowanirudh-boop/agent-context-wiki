@@ -33,6 +33,15 @@ def insert_block(page: Page, section: str, block: ContextBlock) -> Page:
     return _insert_at(page, position, [ProseSegment(heading_text), BlockSegment(block), ProseSegment("\n\n")])
 
 
+def append_section_prose(page: Page, section: str, text: str) -> Page:
+    _validate_section(section)
+    headings = _find_headings(page)
+    existing = _heading_by_name(headings, section)
+    position = _section_end(page, headings, existing) if existing else _new_section_position(page, headings, section)
+    heading = "" if existing else f"## {section}\n\n"
+    return _insert_at(page, position, [ProseSegment(_prefix_for_insert(page, position) + heading + text + "\n\n")])
+
+
 def set_status(
     page: Page,
     block_id: str,
@@ -80,7 +89,6 @@ def replace_block_content(
 
 def add_pending_marker(page: Page, block_id: str, review_row_id: str) -> Page:
     def update(block: ContextBlock) -> ContextBlock:
-        _refuse_user_edited(block)
         if review_row_id in block.pending_review_ids:
             return block
         return _copy_block(block, pending_review_ids=[*block.pending_review_ids, review_row_id])
@@ -90,7 +98,6 @@ def add_pending_marker(page: Page, block_id: str, review_row_id: str) -> Page:
 
 def remove_pending_marker(page: Page, block_id: str, review_row_id: str | None = None) -> Page:
     def update(block: ContextBlock) -> ContextBlock:
-        _refuse_user_edited(block)
         if review_row_id is None:
             pending_review_ids: list[str] = []
         else:

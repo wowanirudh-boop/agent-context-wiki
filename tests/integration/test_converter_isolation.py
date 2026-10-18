@@ -65,19 +65,22 @@ class RecordingPool:
     async def execute(self, query: str, *args):
         self.execute_calls.append((query, args))
 
+    async def fetchrow(self, query: str, *args):
+        return None
+
 
 async def test_s3_key_isolation_ignores_filename_and_path_metadata(monkeypatch, tmp_path):
     from infra import tus
 
     tus._uploads.clear()
     temp_path = tmp_path / "upload.bin"
-    temp_path.write_bytes(b"tenant-a")
+    temp_path.write_bytes(b"%PDF-1.4\ntenant-a")
 
     upload = tus.TusUpload(
         upload_id="upload-1",
         user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        upload_length=8,
-        upload_offset=8,
+        upload_length=temp_path.stat().st_size,
+        upload_offset=temp_path.stat().st_size,
         filename="../../bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/secret.pdf",
         knowledge_base_id="11111111-1111-1111-1111-111111111111",
         temp_path=temp_path,
@@ -205,7 +208,7 @@ async def test_ocr_service_has_no_shared_mutable_state_between_requests(monkeypa
         await asyncio.sleep(0.01)
         return [(1, f"{ext}:{source_url}")]
 
-    async def fake_store_extracted_pages(document_id, user_id, kb_id, page_contents, parser, page_elements=None):
+    async def fake_store_extracted_pages(document_id, user_id, kb_id, page_contents, parser, page_elements=None, assets=None):
         stored.append((document_id, user_id, kb_id, page_contents, parser))
 
     monkeypatch.setattr(service, "_call_converter_extract", fake_call_converter_extract)
@@ -240,7 +243,7 @@ async def test_ocr_service_has_no_shared_mutable_state_between_requests(monkeypa
 async def test_process_opendataloader_uses_isolated_tempdirs_under_concurrency(monkeypatch):
     ocr = _import_ocr_module(monkeypatch)
     s3 = RecordingS3()
-    service = ocr.OCRService(s3, pool=None)
+    service = ocr.OCRService(s3, pool=RecordingPool())
     stored = []
     created_dirs = []
     seen_pdf_paths = []
@@ -264,7 +267,7 @@ async def test_process_opendataloader_uses_isolated_tempdirs_under_concurrency(m
         time.sleep(0.02)
         return [(1, Path(pdf_path).read_text(encoding="utf-8"), [])]
 
-    async def fake_store_extracted_pages(document_id, user_id, kb_id, page_contents, parser, page_elements=None):
+    async def fake_store_extracted_pages(document_id, user_id, kb_id, page_contents, parser, page_elements=None, assets=None):
         stored.append((document_id, user_id, page_contents, parser))
 
     monkeypatch.setattr(ocr.tempfile, "TemporaryDirectory", RecordingTemporaryDirectory)

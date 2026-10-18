@@ -113,7 +113,10 @@ async def detect_candidate_conflict(
             existing_mtime_ns=await dao.get_document_mtime_ns(comparison.block.source_id),
         )
         judged = await judge_conflict_pair(provider, candidate, comparison, basis)
-        if judged.verdict == "duplicate":
+        # PRD section 2: retrieval similarity cannot override semantic identity.
+        if candidate.key != comparison.block.key:
+            continue
+        if judged.verdict == "duplicate" and candidate.source_path == comparison.block.source_path:
             return ConflictDetectionResult(kind="duplicate", existing=comparison)
         if judged.verdict == "conflict":
             return ConflictDetectionResult(
@@ -122,6 +125,14 @@ async def detect_candidate_conflict(
                 conflict_type=judged.conflict_type,
                 recommendation=judged.recommendation,
                 rationale=judged.rationale,
+                recommendation_basis=judged.recommendation_basis,
+            )
+        if candidate.key == comparison.block.key:
+            # FR-CONF-03 / FR-LINT-03: a model cannot silently accept competing
+            # values for one key, or discard corroborating evidence from another source.
+            return ConflictDetectionResult(
+                kind="conflict", existing=comparison, conflict_type=ConflictType.ambiguous_update,
+                recommendation=ReviewDecision.needs_more_info, rationale=judged.rationale,
                 recommendation_basis=judged.recommendation_basis,
             )
     return ConflictDetectionResult(kind="distinct")

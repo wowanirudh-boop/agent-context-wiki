@@ -12,8 +12,16 @@ from httpx import ASGITransport, AsyncClient as HTTPXAsyncClient
 
 
 @pytest.fixture
-def converter_module(monkeypatch):
-    Path("/tmp/conversions").mkdir(parents=True, exist_ok=True)
+def converter_module(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONVERTER_SECRET", "test-converter-secret")
+    temporary_directory = tempfile.TemporaryDirectory
+
+    def local_temporary_directory(*args, **kwargs):
+        if kwargs.get("dir") == "/tmp/conversions":
+            kwargs["dir"] = str(tmp_path)
+        return temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", local_temporary_directory)
 
     fake_module = types.SimpleNamespace(convert=lambda **kwargs: None)
     monkeypatch.setitem(sys.modules, "opendataloader_pdf", fake_module)
@@ -30,6 +38,15 @@ def _install_mocks(monkeypatch, converter_module):
         def raise_for_status(self):
             return None
 
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_bytes(self, chunk_size):
+            yield self.content
+
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs):
             pass
@@ -40,7 +57,7 @@ def _install_mocks(monkeypatch, converter_module):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def get(self, url: str):
+        def stream(self, method: str, url: str):
             if "alpha" in url:
                 return FakeDownloadResponse(b"alpha document")
             if "beta" in url:
@@ -64,13 +81,17 @@ def _install_mocks(monkeypatch, converter_module):
         Path(output_dir, "result.json").write_text(json.dumps(payload), encoding="utf-8")
 
     monkeypatch.setattr(converter_module.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(converter_module.opendataloader_pdf, "convert", fake_convert)
+    def fake_run(command, timeout, what):
+        fake_convert(input_path=command[-2], output_dir=command[-1], format="json", quiet=True)
+
+    monkeypatch.setattr(converter_module, "_run_in_process_group", fake_run)
 
 
 async def _post_extract(converter_module, payload: dict, headers: dict | None = None):
     transport = ASGITransport(app=converter_module.app)
     async with HTTPXAsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.post("/extract", json=payload, headers=headers or {})
+        auth = {"Authorization": "Bearer test-converter-secret"} if headers is None else headers
+        return await client.post("/extract", json=payload, headers=auth)
 
 
 async def test_request_id_echo_and_absence(monkeypatch, converter_module):
@@ -182,7 +203,7 @@ async def test_auth_enforcement(monkeypatch, converter_module):
         "source_ext": "pdf",
     }
 
-    missing = await _post_extract(converter_module, payload)
+    missing = await _post_extract(converter_module, payload, headers={})
     wrong = await _post_extract(converter_module, payload, headers={"Authorization": "Bearer nope"})
     correct = await _post_extract(converter_module, payload, headers={"Authorization": "Bearer top-secret"})
 

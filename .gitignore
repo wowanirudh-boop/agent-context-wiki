@@ -49,6 +49,7 @@ nvidia-10k-first20.md
 .claude
 .playwright-mcp
 .pytest_cache
+/.tmp/
 
 CLAUDE.md
 

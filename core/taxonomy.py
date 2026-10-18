@@ -8,12 +8,12 @@ from pathlib import Path
 import aiosqlite
 
 from core.blocks.model import BlockSegment, ContextBlock, Page, ProseSegment
-from core.blocks.mutations import insert_block
+from core.blocks.mutations import append_section_prose, insert_block, set_generated_section
 from core.blocks.parser import parse_page
 from core.blocks.serializer import serialize_page, write_page
 from core.db.dao import ACWDao
 from core.db.migrate import apply_migrations
-from core.gitops import commit_taxonomy_operation, ensure_wiki_repo
+from core.gitops import commit_taxonomy_operation, ensure_wiki_repo, mark_user_edited_blocks
 from core.lock import WorkspaceLock
 from core.models import EventKind
 from core.registry import PageRegistry
@@ -42,32 +42,49 @@ async def merge_pages(workspace: str | Path, source_page: str, target_page: str)
     ws = Path(workspace)
     with WorkspaceLock(ws, "taxonomy"):
         async with _connect(ws) as ctx:
-            source = await _resolve(ctx.registry, source_page)
-            target = await _resolve(ctx.registry, target_page)
-            source_path = ws / str(source["path"])
-            target_path = ws / str(target["path"])
-            source_text = source_path.read_text(encoding="utf-8") if source_path.exists() else f"# {source['title']}\n"
-            target_text = target_path.read_text(encoding="utf-8") if target_path.exists() else f"# {target['title']}\n"
-            source_model = parse_page(source_text)
-            target_model = parse_page(target_text)
-            for block, section in _blocks_with_sections(source_model):
-                target_model = insert_block(target_model, section if section in _canonical_sections() else "Rules", block)
-                await ctx.db.execute("UPDATE acw_blocks SET page_id = ? WHERE id = ?", (target["id"], block.id))
-            write_page(target_path, target_model, expected_text=target_text if target_path.exists() else None)
-            ctx.changed_pages.add(str(target["path"]))
-            _write_redirect_stub(source_path, old_title=str(source["title"]), target_title=str(target["title"]), reason="Merged into")
-            ctx.changed_pages.add(str(source["path"]))
-            aliases = list(dict.fromkeys([*source.get("aliases", []), str(source["title"])]))
-            await ctx.registry.update_page(str(source["id"]), status=f"merged_into:{target['id']}", aliases=aliases)
-            await _rewrite_inbound_links(ctx, old_page=source, new_title=str(target["title"]))
-            await ctx.dao.write_event(
-                kind=EventKind.taxonomy_merge,
-                actor="core.taxonomy",
-                payload={"source_page_id": source["id"], "target_page_id": target["id"]},
-            )
-            await ctx.db.commit()
+            await _merge_pages(ctx, source_page, target_page)
         commit = commit_taxonomy_operation(ws, "merge", f"{source_page} -> {target_page}")
         return TaxonomyResult("merge", sorted(ctx.changed_pages), commit.committed, commit.message)
+
+
+async def _merge_pages(ctx: _TaxonomyContext, source_page: str, target_page: str) -> None:
+    source = await _resolve(ctx.registry, source_page)
+    target = await _resolve(ctx.registry, target_page)
+    if source["id"] == target["id"]:
+        raise ValueError("Cannot merge a page into itself")
+    source_path = ctx.workspace / str(source["path"])
+    target_path = ctx.workspace / str(target["path"])
+    source_text = source_path.read_text(encoding="utf-8") if source_path.exists() else f"# {source['title']}\n"
+    target_text = target_path.read_text(encoding="utf-8") if target_path.exists() else f"# {target['title']}\n"
+    source_model = parse_page(source_text)
+    target_model = parse_page(target_text)
+    active_statuses = {"current", "needs_review"}
+    source_keys = {block.key for block in source_model.blocks if block.status.value in active_statuses}
+    target_keys = {block.key for block in target_model.blocks if block.status.value in active_statuses}
+    if collisions := source_keys & target_keys:
+        raise ValueError(f"Resolve competing current blocks before merging: {', '.join(sorted(collisions))}")
+    for block, section in _blocks_with_sections(source_model):
+        target_model = insert_block(target_model, section if section in _canonical_sections() else "Rules", block)
+        await ctx.db.execute("UPDATE acw_blocks SET page_id = ? WHERE id = ?", (target["id"], block.id))
+    prose = _manual_prose(source_model)
+    if prose:
+        target_model = append_section_prose(target_model, "Historical Notes", prose)
+    write_page(target_path, target_model, expected_text=target_text if target_path.exists() else None)
+    ctx.changed_pages.add(str(target["path"]))
+    _write_redirect_stub(source_path, old_title=str(source["title"]), target_title=str(target["title"]), reason="Merged into")
+    ctx.changed_pages.add(str(source["path"]))
+    aliases = list(dict.fromkeys([*source.get("aliases", []), str(source["title"])]))
+    await ctx.registry.update_page(str(source["id"]), status=f"merged_into:{target['id']}", aliases=aliases)
+    await ctx.registry.update_page(str(target["id"]), aliases=[*target.get("aliases", []), *aliases, str(source["path"])])
+    await ctx.db.execute("UPDATE acw_review_rows SET page_id = ? WHERE page_id = ? AND row_kind != 'taxonomy_merge'",
+                         (target["id"], source["id"]))
+    await _rewrite_inbound_links(ctx, old_page=source, new_title=str(target["title"]))
+    await ctx.dao.write_event(
+        kind=EventKind.taxonomy_merge,
+        actor="core.taxonomy",
+        payload={"source_page_id": source["id"], "target_page_id": target["id"]},
+    )
+    await ctx.db.commit()
 
 
 async def rename_page(workspace: str | Path, page: str, new_title: str) -> TaxonomyResult:
@@ -83,7 +100,8 @@ async def rename_page(workspace: str | Path, page: str, new_title: str) -> Taxon
             text = old_file.read_text(encoding="utf-8") if old_file.exists() else f"# {old_title}\n"
             model = _rename_heading(parse_page(text), old_title, new_title)
             write_page(new_file, model, expected_text=None)
-            _write_redirect_stub(old_file, old_title=old_title, target_title=new_title, reason="Renamed to")
+            if old_file != new_file:
+                _write_redirect_stub(old_file, old_title=old_title, target_title=new_title, reason="Renamed to")
             aliases = list(dict.fromkeys([*row.get("aliases", []), old_title]))
             await ctx.registry.update_page(str(row["id"]), title=new_title, path=new_path, aliases=aliases)
             ctx.changed_pages.update({old_path, new_path})
@@ -126,6 +144,8 @@ async def split_page(
             for block in moving:
                 new_model = insert_block(new_model, section_spec if section_spec in _canonical_sections() else "Rules", block)
                 await ctx.db.execute("UPDATE acw_blocks SET page_id = ? WHERE id = ?", (created["id"], block.id))
+                await ctx.db.execute("UPDATE acw_review_rows SET page_id = ? WHERE existing_block_id = ?",
+                                     (created["id"], block.id))
             source_model = Page(
                 [
                     segment
@@ -155,13 +175,51 @@ async def _connect(workspace: Path):
     dao = ACWDao(db)
     ctx = _TaxonomyContext(workspace=workspace, db=db, dao=dao, registry=PageRegistry(dao))
     try:
+        await mark_user_edited_blocks(workspace, db)
         yield ctx
+        await _refresh_derived_pages(ctx)
     finally:
         await db.close()
 
 
+async def _refresh_derived_pages(ctx: _TaxonomyContext) -> None:
+    from core.conflicts.markers import open_conflicts_body
+    from core.coverage import render_coverage_sections
+    from core.ledger import ChunkLedger
+    from core.llm.provider import provider_from_config
+    from core.summary import render_summaries_and_index
+
+    for page in await ctx.registry.list_pages():
+        if page["status"] != "active":
+            continue
+        path = ctx.workspace / str(page["path"])
+        text = path.read_text(encoding="utf-8")
+        body = await open_conflicts_body(ctx.db, str(page["id"]))
+        if "## Open Conflicts" in text or body != "_No open conflicts._":
+            write_page(path, set_generated_section(parse_page(text), "Open Conflicts", body, run_id="taxonomy"), expected_text=text)
+    await render_coverage_sections(ctx.workspace, ctx.db, run_id="taxonomy")
+    await render_summaries_and_index(ctx.workspace, ctx.db, run_id="taxonomy", provider=provider_from_config(ctx.workspace, dao=ctx.dao))
+    await ChunkLedger(ctx.dao).export_json(ctx.workspace, run_id="taxonomy")
+    await ctx.registry.export_json(ctx.workspace)
+
+
+def _manual_prose(page: Page) -> str:
+    retained = []
+    for segment in page.segments:
+        if not isinstance(segment, ProseSegment):
+            continue
+        sections = re.split(r"(?m)(?=^## )", segment.text)
+        for section in sections:
+            if "<!-- acw:generated " in section:
+                continue
+            lines = [line for line in section.splitlines() if not line.startswith("# ")]
+            if any(line.strip() and not line.startswith("## ") for line in lines):
+                retained.extend(lines)
+    return "\n".join(retained).strip()
+
+
 async def _resolve(registry: PageRegistry, ref: str):
-    page = await registry.resolve_page(ref)
+    page = await registry.get_page(ref) or await registry.resolve_page(ref)
     if page is None:
         raise KeyError(ref)
     return page
@@ -235,7 +293,7 @@ def _rename_heading(page: Page, old_title: str, new_title: str) -> Page:
 def _write_redirect_stub(path: Path, *, old_title: str, target_title: str, reason: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = f"---\naliases:\n  - {old_title}\n---\n# {old_title}\n\n{reason} [[{target_title}]].\n"
-    path.write_text(text, encoding="utf-8")
+    write_page(path, Page([ProseSegment(text)]))
 
 
 def _old_link_refs(page) -> set[str]:

@@ -46,6 +46,7 @@ def chunk_text(
     overlap: int = CHUNK_OVERLAP,
     page: int | None = None,
     start_char_offset: int = 0,
+    min_chunk_tokens: int = MIN_CHUNK_TOKENS,
 ) -> list[Chunk]:
     """Chunk a text string into overlapping segments with header tracking."""
     if not content or not content.strip():
@@ -71,7 +72,7 @@ def chunk_text(
 
         if current_tokens + para_tokens > chunk_size and current_blocks:
             chunk_text_str = "\n\n".join(current_blocks)
-            if _estimate_tokens(chunk_text_str) >= MIN_CHUNK_TOKENS:
+            if _estimate_tokens(chunk_text_str) >= min_chunk_tokens:
                 breadcrumb = " > ".join(t for _, t in header_stack)
                 chunks.append(Chunk(
                     index=len(chunks),
@@ -93,7 +94,7 @@ def chunk_text(
 
     if current_blocks:
         chunk_text_str = "\n\n".join(current_blocks)
-        if _estimate_tokens(chunk_text_str) >= MIN_CHUNK_TOKENS:
+        if _estimate_tokens(chunk_text_str) >= min_chunk_tokens:
             breadcrumb = " > ".join(t for _, t in header_stack)
             chunks.append(Chunk(
                 index=len(chunks),
@@ -167,11 +168,11 @@ def _split_oversized(text: str) -> list[str]:
     return pieces
 
 
-def chunk_pages(page_contents: list[tuple[int, str]]) -> list[Chunk]:
+def chunk_pages(page_contents: list[tuple[int, str]], *, min_chunk_tokens: int = MIN_CHUNK_TOKENS) -> list[Chunk]:
     """Chunk multiple pages, preserving page numbers. Each (page_number, content) tuple."""
     all_chunks: list[Chunk] = []
     for page_num, content in page_contents:
-        page_chunks = chunk_text(content, page=page_num)
+        page_chunks = chunk_text(content, page=page_num, min_chunk_tokens=min_chunk_tokens)
         for c in page_chunks:
             c.index = len(all_chunks)
             all_chunks.append(c)

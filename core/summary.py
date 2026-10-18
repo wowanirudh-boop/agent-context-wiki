@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,12 +16,13 @@ from core.blocks.parser import parse_page
 from core.blocks.serializer import serialize_page, write_page
 from core.config import ACWConfig, load_config
 from core.db.dao import ACWDao, Row
-from core.llm.calls import C5_SCHEMA, complete_validated, validate_c5_response
+from core.llm.calls import C5_SCHEMA, CallValidationError, complete_validated, validate_c5_response
 from core.llm.provider import LLMProvider
-from core.models import BlockStatus
+from core.models import BlockStatus, EventKind
 from core.registry import PageRegistry
 
 _SUMMARY_FINGERPRINT_PREFIX = "<!-- acw:summary-fingerprint "
+logger = logging.getLogger("acw.summary")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +53,13 @@ async def render_summaries_and_index(
         fingerprint = current_block_fingerprint(current_blocks)
         if _summary_is_current(old_text, fingerprint):
             continue
-        summary = await _summary_for_page(page, current_blocks, provider=provider, max_words=cfg.summary_max_words)
+        try:
+            summary = await _summary_for_page(page, current_blocks, provider=provider, max_words=cfg.summary_max_words)
+        except CallValidationError as exc:
+            logger.warning("Skipping invalid summary for %s: %s", page["path"], exc)
+            await dao.write_event(kind=EventKind.llm_validation_failed, actor="core.summary",
+                                  payload={"call_site": "C5", "page_id": page["id"], "error": str(exc)})
+            continue
         updated = set_generated_section(
             page_model,
             "Summary",

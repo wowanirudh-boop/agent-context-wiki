@@ -46,6 +46,16 @@ def test_fr_block_03_canonical_example_parses_and_reserializes_byte_identically(
     assert block.excerpt == '"Customers may request a refund within thirty (30) days of the delivery date."'
 
 
+def test_fr_block_04_written_bytes_round_trip_on_windows(tmp_path: Path) -> None:
+    from core.blocks.parser import parse_page
+    from core.blocks.serializer import serialize_page, write_page
+
+    path = tmp_path / "page.md"
+    write_page(path, parse_page(CANONICAL_BLOCK))
+    raw = path.read_bytes()
+    assert serialize_page(parse_page(raw.decode("utf-8"))).encode("utf-8") == raw
+
+
 def test_fr_block_01_context_block_schema_and_status_serialization() -> None:
     from core.blocks.model import BlockSegment, Page
     from core.blocks.serializer import BlockSerializationError, serialize_page
@@ -178,6 +188,19 @@ def test_fr_block_04_replace_content_refuses_user_edited_block() -> None:
 
     with pytest.raises(UserEditedBlockError):
         replace_block_content(page, block.id, content="Changed by system")
+
+
+def test_fr_git_02_pending_markers_preserve_user_edited_content() -> None:
+    from core.blocks.model import BlockSegment, Page
+    from core.blocks.mutations import add_pending_marker, remove_pending_marker
+
+    block = _block(user_edited=True)
+    page = Page([BlockSegment(block)])
+    marked = add_pending_marker(page, block.id, "RR-test-1")
+    assert marked.blocks[0].content == block.content
+    assert marked.blocks[0].excerpt == block.excerpt
+    assert marked.blocks[0].user_edited
+    assert remove_pending_marker(marked, block.id, "RR-test-1").blocks[0] == block
 
 
 def test_fr_block_04_set_status_updates_metadata_without_touching_body() -> None:

@@ -8,6 +8,7 @@ import pytest
 
 from core.blocks.model import BlockSegment, ContextBlock, Page, ProseSegment
 from core.blocks.serializer import serialize_page
+from core.llm.provider import StructuredPayload, StructuredResponse, StructuredSchema
 from core.models import BlockStatus, BlockType, ConflictType, ReviewDecision
 from tests.v2.fakes.fake_llm import FakeLLM, fingerprint_payload
 from tests.v2.unit.test_reingest import _apply_base_schema, _insert_document, _seed_workspace
@@ -120,6 +121,64 @@ async def test_fr_conf_03_exact_duplicate_short_circuits_without_c3_call(
     assert result.kind == "duplicate"
     assert result.existing.block.id == "cb_existing"
     assert fake.call_count == 0
+
+
+@pytest.mark.parametrize("verdict", ["distinct", "duplicate"])
+async def test_fr_conf_03_same_key_from_another_source_requires_review(
+    tmp_workspace: Path, tmp_sqlite: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch, verdict: str,
+) -> None:
+    from core.conflicts.detect import detect_candidate_conflict
+    from core.db.dao import ACWDao
+    from core.db.migrate import apply_migrations
+    from core.registry import PageRegistry
+
+    await _apply_base_schema(tmp_sqlite)
+    await _seed_workspace(tmp_sqlite)
+    await apply_migrations(tmp_sqlite)
+    await _insert_document(tmp_sqlite, doc_id="doc_existing", relative_path="docs/tnc.md")
+    page = await PageRegistry(ACWDao(tmp_sqlite)).create_page(title="Refunds", path="wiki/refunds.md", description="")
+    existing = _block(block_id="cb_existing", key="refunds.retry_count", content="Retry 3 times.")
+    _write_page(tmp_workspace, page["path"], page["title"], [existing])
+    await _persist_blocks(tmp_sqlite, page["id"], [existing])
+    candidate = existing.model_copy(update={"id": "cb_candidate", "source_path": "docs/another.md"})
+    fake = FakeLLM.rule_based()
+
+    async def judge(call_site: str, payload: StructuredPayload, schema: StructuredSchema) -> StructuredResponse:
+        return {"verdict": verdict, "conflict_type": None, "recommendation": "keep_existing", "rationale": "Same subject."}
+
+    monkeypatch.setattr(fake, "complete_structured", judge)
+    result = await detect_candidate_conflict(tmp_workspace, tmp_sqlite, page, candidate, provider=fake)
+    assert result.kind == "conflict"
+    assert result.conflict_type == ConflictType.ambiguous_update
+
+
+@pytest.mark.parametrize("verdict", ["duplicate", "conflict"])
+async def test_fr_conf_03_different_keys_cannot_duplicate_or_conflict(
+    tmp_workspace: Path, tmp_sqlite: aiosqlite.Connection, monkeypatch: pytest.MonkeyPatch, verdict: str,
+) -> None:
+    from core.conflicts.detect import detect_candidate_conflict
+    from core.db.dao import ACWDao
+    from core.db.migrate import apply_migrations
+    from core.registry import PageRegistry
+
+    await _apply_base_schema(tmp_sqlite)
+    await _seed_workspace(tmp_sqlite)
+    await apply_migrations(tmp_sqlite)
+    await _insert_document(tmp_sqlite, doc_id="doc_existing", relative_path="docs/tnc.md")
+    page = await PageRegistry(ACWDao(tmp_sqlite)).create_page(title="Refunds", path="wiki/refunds.md", description="")
+    existing = _block(block_id="cb_existing", key="refunds.retry_count", content="Retry 3 times.")
+    _write_page(tmp_workspace, page["path"], page["title"], [existing])
+    await _persist_blocks(tmp_sqlite, page["id"], [existing])
+    candidate = existing.model_copy(update={"id": "cb_candidate", "key": "payments.retry_count"})
+    fake = FakeLLM.rule_based()
+
+    async def judge(call_site: str, payload: StructuredPayload, schema: StructuredSchema) -> StructuredResponse:
+        return {"verdict": verdict, "conflict_type": "changed_scope" if verdict == "conflict" else None,
+                "recommendation": "keep_existing", "rationale": "Similar words."}
+
+    monkeypatch.setattr(fake, "complete_structured", judge)
+    result = await detect_candidate_conflict(tmp_workspace, tmp_sqlite, page, candidate, provider=fake)
+    assert result.kind == "distinct"
 
 
 @pytest.mark.asyncio

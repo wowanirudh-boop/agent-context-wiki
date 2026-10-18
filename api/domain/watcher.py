@@ -128,8 +128,20 @@ async def _schedule_processing(
 ) -> None:
     if not schedule_processing:
         return
-    from domain.local_processor import process_document as _process
-    asyncio.create_task(_process(db, doc_id, workspace))
+    asyncio.create_task(_process_when_unlocked(db, doc_id, workspace))
+
+
+async def _process_when_unlocked(db: aiosqlite.Connection, doc_id: str, workspace: Path) -> None:
+    from domain.local_processor import process_document
+    from core.lock import WorkspaceLock, WorkspaceLockError
+
+    while True:
+        try:
+            with WorkspaceLock(workspace, "extract"):
+                await process_document(db, doc_id, workspace)
+            return
+        except WorkspaceLockError:
+            await asyncio.sleep(1)
 
 
 async def _clear_extracted_rows(db: aiosqlite.Connection, doc_id: str) -> None:
@@ -177,6 +189,12 @@ async def _index_file(
     if existing:
         doc_id, old_hash, old_status, old_relative, old_path = existing
         metadata_current = old_relative == relative and old_path == dir_path
+        if old_hash == content_hash and content is None and metadata_current:
+            # Keep extracted content and retry history for unchanged binary sources.
+            cursor = await db.execute("SELECT 1 FROM document_chunks WHERE document_id = ? LIMIT 1", (doc_id,))
+            if old_status != "ready" or await cursor.fetchone() is not None:
+                return
+            # A reindex removes extraction rows; queue their reconstruction.
         if old_hash == content_hash and old_status == status and metadata_current:
             if status == "ready" and content is not None:
                 from core.ingest import index_document_chunks
@@ -277,6 +295,16 @@ async def scan_workspace(
                 schedule_processing=schedule_processing,
             )
             indexed += 1
+    # FR-REING-03: a manual process run must notice deletions without a watcher.
+    cursor = await db.execute(
+        "SELECT id, relative_path FROM documents WHERE source_kind = 'source' "
+        "AND COALESCE(error_message, '') != 'Source file removed'",
+    )
+    for source_id, relative in await cursor.fetchall():
+        if not (workspace / relative).is_file():
+            from core.reingest import mark_source_deleted
+
+            await mark_source_deleted(db, source_id)
     return indexed
 
 
@@ -285,7 +313,7 @@ async def watch_workspace(db: aiosqlite.Connection, workspace: Path) -> None:
 
     Runs indefinitely as an async task. Cancel to stop.
     """
-    from watchfiles import awatch, Change
+    from watchfiles import awatch
 
     logger.info("File watcher started: %s", workspace)
 
@@ -295,7 +323,7 @@ async def watch_workspace(db: aiosqlite.Connection, workspace: Path) -> None:
         debounce=500,
         step=200,
     ):
-        for change_type, path_str in changes:
+        for _, path_str in changes:
             path = Path(path_str)
 
             if _should_ignore(path, workspace):
@@ -305,11 +333,7 @@ async def watch_workspace(db: aiosqlite.Connection, workspace: Path) -> None:
                 continue
 
             try:
-                if change_type == Change.added or change_type == Change.modified:
-                    if path.is_file():
-                        await _index_file(db, workspace, path)
-                elif change_type == Change.deleted:
-                    await _remove_file(db, workspace, path)
+                await _apply_watched_change(db, workspace, path)
             except Exception as e:
                 logger.warning("Watcher error for %s: %s", path_str, e)
 
@@ -320,6 +344,24 @@ async def watch_workspace(db: aiosqlite.Connection, workspace: Path) -> None:
         expired = [k for k, v in _recently_written.items() if now - v > COOLDOWN_SECONDS * 2]
         for k in expired:
             _recently_written.pop(k, None)
+
+
+async def _apply_watched_change(db: aiosqlite.Connection, workspace: Path, path: Path) -> None:
+    from core.config import load_config
+    from core.ingest import extract_pending_sources
+    from core.lock import WorkspaceLock, WorkspaceLockError
+
+    while True:
+        try:
+            with WorkspaceLock(workspace, "watcher"):
+                if path.is_file():
+                    await _index_file(db, workspace, path, schedule_processing=False)
+                else:
+                    await _remove_file(db, workspace, path)
+                await extract_pending_sources(db, workspace, max_attempts=load_config(workspace).max_attempts)
+            return
+        except WorkspaceLockError:
+            await asyncio.sleep(1)
 
 
 def auto_process_enabled(workspace: Path) -> bool:

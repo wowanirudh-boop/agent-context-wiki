@@ -59,7 +59,7 @@ def write_page(path: str | Path, page: Page, *, expected_text: str | None = None
     page_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = page_path.with_name(f".{page_path.name}.tmp")
     try:
-        temp_path.write_text(text, encoding=encoding)
+        temp_path.write_text(text, encoding=encoding, newline="")
         os.replace(temp_path, page_path)
     finally:
         if temp_path.exists():

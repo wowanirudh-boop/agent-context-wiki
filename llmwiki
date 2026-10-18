@@ -163,6 +163,7 @@ def cmd_serve(workspace: str, open_browser: bool = True) -> None:
 
     env = os.environ.copy()
     env["MODE"] = "local"
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(REPO_ROOT), env.get("PYTHONPATH", "")]))
     env["WORKSPACE_PATH"] = str(ws)
     env["DATABASE_URL"] = ""
     env["APP_URL"] = "http://localhost:3000"
@@ -231,6 +232,9 @@ def cmd_mcp(workspace: str) -> None:
     # the module no matter where the CLI was invoked from (Claude Desktop /
     # Code launches this with cwd set to ~ on macOS).
     os.chdir(str(MCP_DIR))
+    if os.name == "nt":
+        # Windows execvp does not preserve quoting for paths containing spaces.
+        raise SystemExit(subprocess.call([sys.executable, "-m", "local_server", "--workspace", str(ws)]))
     os.execvp(
         sys.executable,
         [sys.executable, "-m", "local_server", "--workspace", str(ws)],
@@ -302,15 +306,16 @@ def _cmd_reindex_locked(ws: Path, db_path: Path) -> None:
 def cmd_process(workspace: str) -> None:
     ws = Path(workspace).resolve()
     db_path = ws / ".llmwiki" / "index.db"
-    if not db_path.exists():
-        cmd_init(str(ws))
-    else:
-        _apply_acw_migrations(ws)
-        _index_existing_files(ws, db_path, "", "")
+    from core.lock import WorkspaceLock
+    from core.pipeline.run import _run_processing_run_locked
 
-    from core.pipeline.run import run_processing_run
-
-    result = asyncio.run(run_processing_run(ws))
+    with WorkspaceLock(ws, "process") as lock:
+        if not db_path.exists():
+            cmd_init(str(ws))
+        else:
+            _apply_acw_migrations(ws)
+            _index_existing_files(ws, db_path, "", "")
+        result = asyncio.run(_run_processing_run_locked(ws, lock_stolen=lock.stolen))
     print(f"OK Processed workspace: {ws}")
     print(f"  run: {result.run_id}")
     print(f"  pending: {result.stats.get('pending', 0)}")

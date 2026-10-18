@@ -40,10 +40,8 @@ async def open_conflicts_body(
     rows = [
         row
         for row in await dao.list_review_rows(open_only=True)
-        if row["page_id"] == page_id and row["row_kind"] == "conflict"
+        if row["page_id"] == page_id and row["row_kind"] in {"conflict", "needs_review"}
     ]
-    if not rows:
-        return "_No open conflicts._"
     lines = []
     blocks = {row["id"]: row for row in await dao.list_blocks_for_page(page_id)}
     for row in rows:
@@ -60,7 +58,10 @@ async def open_conflicts_body(
             f"- {row['id']}: {row['conflict_type']} on `{key}`{source} "
             f"(recommendation: {row['recommendation']})"
         )
-    return "\n".join(lines)
+    for block in blocks.values():
+        if block["status"] == "conflicted":
+            lines.append(f"- {block['id']}: `{block['key']}` (status: conflicted)")
+    return "\n".join(lines) if lines else "_No open conflicts._"
 
 
 def _candidate_json(row: Row) -> object:

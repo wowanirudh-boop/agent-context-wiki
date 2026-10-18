@@ -11,13 +11,13 @@ import aiosqlite
 
 from core.blocks.keys import key_inventory
 from core.blocks.model import ContextBlock, Page, ProseSegment
-from core.blocks.mutations import insert_block
+from core.blocks.mutations import append_section_prose, insert_block, set_status
 from core.blocks.parser import parse_page
-from core.blocks.serializer import serialize_page, write_page
+from core.blocks.serializer import PageWriteConflict, serialize_block, write_page
 from core.conflicts.detect import detect_candidate_conflict
 from core.conflicts.markers import apply_pending_conflict_marker
 from core.db.dao import ACWDao, Row, json_dumps, utc_now
-from core.gitops import annotate_recommendation_basis
+from core.gitops import annotate_recommendation_basis, mark_user_edited_blocks
 from core.ids import new_id
 from core.ledger import ChunkLedger
 from core.llm.provider import LLMProvider
@@ -72,6 +72,7 @@ class PlacementWriter:
         placement: Mapping[str, Any],
         *,
         default_transcript_type: bool = False,
+        record_disposition: bool = True,
     ) -> PlacementOutcome:
         page = await self._resolve_page(placement)
         block_data = placement["block"]
@@ -86,7 +87,7 @@ class PlacementWriter:
             source_id=str(chunk["source_id"]),
             source_path=str(chunk["source_path"]),
             source_date=str(chunk.get("source_date") or "unknown"),
-            chunk_ids=[str(chunk["id"])],
+            chunk_ids=chunk.get("chunk_ids", [str(chunk["id"])]),
             user_edited=False,
             content=str(block_data["content"]),
             excerpt=_excerpt_for_block(str(block_data["excerpt"])),
@@ -94,8 +95,20 @@ class PlacementWriter:
 
         detection = await detect_candidate_conflict(self.workspace, self.db, page, block, provider=self.provider)
         if detection.kind == "duplicate" and detection.existing is not None:
+            existing = detection.existing.block
+            if existing.status == BlockStatus.needs_review and existing.source_path == block.source_path:
+                path = self.workspace / detection.existing.page_path
+                old_text = path.read_text(encoding="utf-8")
+                updated = set_status(parse_page(old_text), existing.id, BlockStatus.current)
+                write_page(path, updated, expected_text=old_text)
+                await self.db.execute(
+                    "UPDATE acw_blocks SET status = 'current', needs_review_reason = NULL, updated_at = ? WHERE id = ?",
+                    (utc_now(), existing.id),
+                )
+                await self.dao.link_block_chunk(existing.id, str(chunk["id"]))
+                self.page_writes += 1
             current_chunk = await self.dao.get_chunk(str(chunk["id"]))
-            if current_chunk is not None and current_chunk["disposition"] == "pending":
+            if record_disposition and current_chunk is not None and current_chunk["disposition"] == "pending":
                 await self.ledger.mark_duplicate(
                     str(chunk["id"]),
                     duplicate_of_block_id=detection.existing.block.id,
@@ -103,6 +116,7 @@ class PlacementWriter:
                 )
             return PlacementOutcome(kind="duplicate", block_id=detection.existing.block.id)
         if detection.kind == "conflict" and detection.existing is not None:
+            page = await self.registry.get_page(detection.existing.page_id)
             recommendation = detection.recommendation.value if detection.recommendation is not None else "needs_more_info"
             row = await self.dao.create_review_row(
                 run_id=self.run_id,
@@ -118,10 +132,11 @@ class PlacementWriter:
                     user_edited=detection.existing.block.user_edited,
                 ),
             )
-            await self.ledger.mark_conflicted_pending(
-                str(chunk["id"]),
-                reason=detection.conflict_type.value if detection.conflict_type is not None else "ambiguous_update",
-            )
+            if record_disposition:
+                await self.ledger.mark_conflicted_pending(
+                    str(chunk["id"]),
+                    reason=detection.conflict_type.value if detection.conflict_type is not None else "ambiguous_update",
+                )
             await apply_pending_conflict_marker(
                 self.workspace,
                 self.db,
@@ -133,9 +148,9 @@ class PlacementWriter:
             self.page_writes += 1
             return PlacementOutcome(kind="conflicted_pending", review_row_id=str(row["id"]))
 
-        await self._insert_clean_block(page, str(placement["section"]), block)
+        await self._insert_clean_block(page, str(placement["section"]), block, links=placement.get("links", []))
         current_chunk = await self.dao.get_chunk(str(chunk["id"]))
-        if current_chunk is not None and current_chunk["disposition"] == "placed":
+        if not record_disposition or (current_chunk is not None and current_chunk["disposition"] == "placed"):
             await self.dao.link_block_chunk(block.id, str(chunk["id"]))
         else:
             await self.ledger.mark_placed(str(chunk["id"]), block_ids=[block.id])
@@ -155,6 +170,9 @@ class PlacementWriter:
         cache_key = str(new_page["path_slug"])
         if cache_key in self._new_page_cache:
             return self._new_page_cache[cache_key]
+        existing = await self.registry.resolve_page(str(new_page["title"]))
+        if existing is not None:
+            return existing
         path = _unique_page_path(await self.registry.list_pages(), str(new_page["path_slug"]))
         page = await self.registry.create_page(
             title=str(new_page["title"]),
@@ -165,13 +183,29 @@ class PlacementWriter:
         self._new_page_cache[cache_key] = page
         return page
 
-    async def _insert_clean_block(self, page_row: Row, section: str, block: ContextBlock) -> None:
+    async def _insert_clean_block(self, page_row: Row, section: str, block: ContextBlock, *, links: list[str]) -> None:
         path = self.workspace / page_row["path"]
-        old_text = path.read_text(encoding="utf-8") if path.exists() else f"# {page_row['title']}\n"
-        page = parse_page(old_text)
-        updated = insert_block(page, section, block)
-        new_text = serialize_page(updated)
-        content_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+        related = []
+        for ref in links:
+            target = await self.registry.get_page(ref) or await self.registry.resolve_page(ref)
+            if target is None:
+                raise ValueError(f"Unknown related page: {ref}")
+            if target["id"] != page_row["id"]:
+                related.append(f"[[{target['title']}]]")
+        for attempt in range(2):
+            old_text = path.read_text(encoding="utf-8") if path.exists() else f"# {page_row['title']}\n"
+            updated = insert_block(parse_page(old_text), section, block)
+            missing = [link for link in dict.fromkeys(related) if link not in old_text]
+            if missing:
+                updated = append_section_prose(updated, "Related Pages", "\n".join(f"- {link}" for link in missing))
+            try:
+                write_page(path, updated, expected_text=old_text if path.exists() else None)
+                break
+            except PageWriteConflict:
+                if attempt:
+                    raise
+                await mark_user_edited_blocks(self.workspace, self.db)
+        content_hash = hashlib.sha256(serialize_block(block).encode("utf-8")).hexdigest()
         await self.dao.create_block(
             block_id=block.id,
             page_id=str(page_row["id"]),
@@ -186,7 +220,6 @@ class PlacementWriter:
             updated_at=utc_now(),
             user_edited=block.user_edited,
         )
-        write_page(path, updated, expected_text=old_text if path.exists() else None)
         self.page_writes += 1
         self.blocks_created += 1
 
@@ -233,6 +266,5 @@ def _unique_page_path(pages: list[Row], path_slug: str) -> str:
 
 
 def _excerpt_for_block(excerpt: str) -> str:
-    if len(excerpt) <= 1500:
-        return excerpt
-    return f"{excerpt[:748]}[...] {excerpt[-748:]}"
+    # FR-BLOCK-05 permits full excerpts; clipping could remove asserted values.
+    return excerpt

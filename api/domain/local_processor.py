@@ -18,7 +18,7 @@ import aiosqlite
 from config import settings
 from domain.watcher import mark_written
 from infra.db.sqlite import SQLiteDocumentRepository
-from services.extracted_assets import build_pdf_image_assets
+from api.services.extracted_assets import build_pdf_image_assets
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ SPREADSHEET_TYPES = frozenset({"xlsx", "xls"})
 IMAGE_TYPES = frozenset({"png", "jpg", "jpeg", "webp", "gif"})
 OFFICE_TYPES = frozenset({"pptx", "ppt", "docx", "doc"})
 
-from services.pdf_extract import extract_pdf
+from api.services.pdf_extract import extract_pdf
 
 
 async def process_document(db: aiosqlite.Connection, doc_id: str, workspace: Path) -> None:
@@ -177,8 +177,8 @@ async def _store_page_contents(
 
     full_content = "\n\n---\n\n".join(md for _, md in page_contents)
 
-    from services.chunker import chunk_pages
-    chunks = chunk_pages(page_contents)
+    from api.services.chunker import chunk_pages
+    chunks = chunk_pages(page_contents, min_chunk_tokens=1)
     await _store_chunks(db, doc_id, chunks)
 
     await db.execute(
@@ -302,8 +302,8 @@ async def _process_spreadsheet(db: aiosqlite.Connection, doc_id: str, file_path:
     wb.close()
     full_content = "\n\n".join(all_content)
 
-    from services.chunker import chunk_pages
-    chunks = chunk_pages(page_contents)
+    from api.services.chunker import chunk_pages
+    chunks = chunk_pages(page_contents, min_chunk_tokens=1)
     await _store_chunks(db, doc_id, chunks)
 
     await db.execute(

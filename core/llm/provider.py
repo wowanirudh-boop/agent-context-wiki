@@ -32,6 +32,7 @@ class OpenAIProvider:
     def __init__(self, config: ACWConfig, dao: ACWDao | None = None) -> None:
         self.config = config
         self.dao = dao
+        self.call_count = 0
 
     async def complete_structured(
         self,
@@ -43,8 +44,10 @@ class OpenAIProvider:
 
         started = time.perf_counter()
         ok = False
+        self.call_count += 1
+        input_tokens = output_tokens = 0
         model = self._model_for_call(call_site)
-        client = AsyncOpenAI(api_key=self.config.llm_api_key, base_url=self.config.llm_base_url)
+        client = AsyncOpenAI(api_key=self.config.llm_api_key, base_url=self.config.llm_base_url, max_retries=2)
         try:
             response = await client.responses.create(
                 model=model,
@@ -67,18 +70,28 @@ class OpenAIProvider:
                     }
                 },
             )
-            text = response.output_text
+            if response.usage is not None:
+                input_tokens = response.usage.input_tokens
+                output_tokens = response.usage.output_tokens
+            if response.status != "completed":
+                raise ValueError(f"{call_site} response is {response.status}")
+            parsed = json.loads(response.output_text)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{call_site} response must be a JSON object")
             ok = True
-            return json.loads(text)
+            return parsed
         finally:
-            await self._log_call(call_site, model=model, started=started, ok=ok)
+            await client.close()
+            await self._log_call(call_site, model=model, started=started, ok=ok,
+                                 input_tokens=input_tokens, output_tokens=output_tokens)
 
     def _model_for_call(self, call_site: str) -> str:
         if call_site in {"C1", "C3", "C6"} and self.config.llm_model_light:
             return self.config.llm_model_light
         return self.config.llm_model
 
-    async def _log_call(self, call_site: str, *, model: str, started: float, ok: bool) -> None:
+    async def _log_call(self, call_site: str, *, model: str, started: float, ok: bool,
+                        input_tokens: int, output_tokens: int) -> None:
         if self.dao is None:
             return
         await self.dao.write_event(
@@ -87,8 +100,8 @@ class OpenAIProvider:
             payload={
                 "call_site": call_site,
                 "model": model,
-                "input_tokens": 0,
-                "output_tokens": 0,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "latency_ms": round((time.perf_counter() - started) * 1000),
                 "ok": ok,
             },

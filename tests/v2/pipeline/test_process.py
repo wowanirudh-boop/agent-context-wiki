@@ -208,6 +208,7 @@ async def test_as_uc2_1_fr_read_03_bounded_read_uses_index_summaries_then_full_p
     from tools.wiki_read import WikiReadHandler
 
     from core.pipeline.run import run_processing_run
+    from core.review.apply import apply_decisions
     from tests.v2.fakes.fake_llm import FakeLLM
 
     workspace = tmp_path / "uc2_nodes"
@@ -217,6 +218,12 @@ async def test_as_uc2_1_fr_read_03_bounded_read_uses_index_summaries_then_full_p
     await asyncio.to_thread(module.cmd_reindex, str(workspace))
 
     await run_processing_run(workspace, provider=FakeLLM.rule_based())
+    assert_invariants(workspace)
+    # The nested v2 source proposes 45s over 30s. FR-CONF-03 requires an
+    # explicit decision before that candidate appears in full-page reads.
+    for review in (workspace / "wiki/_reviews").glob("RR-*.md"):
+        review.write_text(review.read_text(encoding="utf-8").replace("- decision:", "- decision: accept_new"), encoding="utf-8")
+    await apply_decisions(workspace, provider=FakeLLM.rule_based())
 
     handler = WikiReadHandler(workspace)
     index = await handler.wiki_index()
@@ -227,7 +234,8 @@ async def test_as_uc2_1_fr_read_03_bounded_read_uses_index_summaries_then_full_p
     )
     assert bounded_words < 4000
 
-    full_pages = [await handler.wiki_page(path) for path in pages]
+    # The golden questions cover both revisions; history is explicit in the read API.
+    full_pages = [await handler.wiki_page(path, statuses=["*"]) for path in pages]
     keys = {
         block["key"]
         for page in full_pages

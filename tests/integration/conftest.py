@@ -12,7 +12,10 @@ DB_URL = os.environ["DATABASE_URL"]
 
 @pytest.fixture(scope="session")
 async def pool():
-    pool = await asyncpg.create_pool(DB_URL, min_size=2, max_size=20)
+    try:
+        pool = await asyncpg.create_pool(DB_URL, min_size=2, max_size=20, timeout=2)
+    except (OSError, TimeoutError):
+        pytest.skip("Local test PostgreSQL is unavailable; start it to run hosted integration tests")
 
     await pool.execute("DROP SCHEMA IF EXISTS public CASCADE")
     await pool.execute("CREATE SCHEMA public")

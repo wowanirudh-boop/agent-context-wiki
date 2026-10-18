@@ -7,7 +7,18 @@ from typing import Any
 from core.blocks.keys import SemanticKeyError, validate_semantic_key
 from core.blocks.model import CANONICAL_SECTIONS
 from core.llm.provider import LLMProvider, StructuredPayload, StructuredResponse, StructuredSchema
-from core.models import BlockType, ConflictType, ReviewDecision
+from core.models import (
+    BlockType,
+    ConflictResponse,
+    ConflictType,
+    DomainHintResponse,
+    FlowResponse,
+    MergeResponse,
+    PlacementResponse,
+    ReviewDecision,
+    SummaryResponse,
+    TranscriptResponse,
+)
 
 C1_PLACEMENT_TEMPLATE = "Classify and place source chunks into source-backed context blocks."
 C2_FLOW_TEMPLATE = "Convert a structured flow definition into Mermaid while preserving nodes and edges."
@@ -17,13 +28,13 @@ C5_SUMMARY_TEMPLATE = "Summarize the current context blocks on a page for bounde
 C6_TRANSCRIPT_TEMPLATE = "Classify transcript segments and mark intra-transcript supersession."
 C7_DOMAIN_HINT_TEMPLATE = "Generate a concise workspace domain hint from sampled sources and registry entries."
 
-C1_SCHEMA: StructuredSchema = {"type": "object", "required": ["chunks"]}
-C2_SCHEMA: StructuredSchema = {"type": "object", "required": ["mermaid", "nodes", "edges"]}
-C3_SCHEMA: StructuredSchema = {"type": "object", "required": ["verdict", "conflict_type", "recommendation", "rationale"]}
-C4_SCHEMA: StructuredSchema = {"type": "object", "required": ["content", "excerpt_policy"]}
-C5_SCHEMA: StructuredSchema = {"type": "object", "required": ["summary_markdown"]}
-C6_SCHEMA: StructuredSchema = {"type": "object", "required": ["segments"]}
-C7_SCHEMA: StructuredSchema = {"type": "object", "required": ["domain_hint_markdown"]}
+C1_SCHEMA: StructuredSchema = PlacementResponse.model_json_schema()
+C2_SCHEMA: StructuredSchema = FlowResponse.model_json_schema()
+C3_SCHEMA: StructuredSchema = ConflictResponse.model_json_schema()
+C4_SCHEMA: StructuredSchema = MergeResponse.model_json_schema()
+C5_SCHEMA: StructuredSchema = SummaryResponse.model_json_schema()
+C6_SCHEMA: StructuredSchema = TranscriptResponse.model_json_schema()
+C7_SCHEMA: StructuredSchema = DomainHintResponse.model_json_schema()
 
 _C3_RECOMMENDATIONS = {
     ReviewDecision.accept_new.value,
@@ -87,11 +98,14 @@ def validate_c1_response(payload: StructuredPayload, response: StructuredRespons
         chunk_text = str(payload_chunks[chunk_id].get("text", ""))
         for placement in placements:
             _validate_c1_placement(payload, placement, chunk_text)
+    if seen != set(payload_chunks):
+        raise CallValidationError(f"C1 missing chunk(s): {sorted(set(payload_chunks) - seen)}")
     return response
 
 
 def validate_c2_response(payload: StructuredPayload, response: StructuredResponse) -> StructuredResponse:
-    del payload
+    from core.lint.checks import _mermaid_flow_counts, _source_flow_counts
+
     if not isinstance(response.get("mermaid"), str) or not response["mermaid"].strip():
         raise CallValidationError("C2 requires non-empty mermaid")
     _list(response, "nodes")
@@ -101,6 +115,12 @@ def validate_c2_response(payload: StructuredPayload, response: StructuredRespons
         condition = edge.get("condition")
         if condition is not None and not isinstance(condition, str):
             raise CallValidationError("C2 edge condition must be a string or null")
+    expected_nodes, expected_edges = _source_flow_counts(str(payload.get("source_text", "")))
+    actual_nodes, actual_edges = _mermaid_flow_counts(response["mermaid"])
+    if min(len(response["nodes"]), actual_nodes) < expected_nodes:
+        raise CallValidationError("C2 dropped source nodes")
+    if min(len(response["edges"]), actual_edges) < expected_edges:
+        raise CallValidationError("C2 dropped source edges")
     return response
 
 
@@ -163,7 +183,23 @@ def validate_c6_response(payload: StructuredPayload, response: StructuredRespons
             raise CallValidationError(f"Unknown superseded_by_chunk_id: {superseded_by}")
         _nullable_string(segment, "key_hint")
         _nullable_string(segment, "source_date_extracted")
+    if seen != payload_ids:
+        raise CallValidationError(f"C6 missing segment(s): {sorted(payload_ids - seen)}")
+    _validate_supersession(payload, segments)
     return response
+
+
+def _validate_supersession(payload: StructuredPayload, segments: list[Any]) -> None:
+    order = {_chunk_id(segment): index for index, segment in enumerate(_list(payload, "segments"))}
+    by_id = {segment["chunk_id"]: segment for segment in segments}
+    for segment in segments:
+        target = segment.get("superseded_by_chunk_id")
+        if target is None:
+            continue
+        if order[target] <= order[segment["chunk_id"]]:
+            raise CallValidationError("Transcript supersession must point to a later segment")
+        if not by_id[target]["relevant"]:
+            raise CallValidationError("Transcript supersession must point to a relevant segment")
 
 
 def validate_c7_response(payload: StructuredPayload, response: StructuredResponse) -> StructuredResponse:

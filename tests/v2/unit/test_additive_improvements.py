@@ -118,12 +118,15 @@ def test_c1_c7_instructions_are_provider_and_queue_visible(tmp_workspace: Path, 
     class _Responses:
         async def create(self, **kwargs: Any) -> Any:
             recorded.update(kwargs)
-            return types.SimpleNamespace(output_text='{"summary_markdown":"ok"}')
+            return types.SimpleNamespace(output_text='{"summary_markdown":"ok"}', usage=None, status="completed")
 
     class _AsyncOpenAI:
         def __init__(self, **kwargs: Any) -> None:
             recorded["client"] = kwargs
             self.responses = _Responses()
+
+        async def close(self) -> None:
+            recorded["closed"] = True
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(AsyncOpenAI=_AsyncOpenAI))
 

@@ -17,6 +17,20 @@ BASE_SCHEMA = ROOT / "shared" / "sqlite_schema.sql"
 FIXTURE_ROOT = ROOT / "tests" / "v2" / "fixtures" / "workspaces"
 
 
+@pytest.mark.asyncio
+async def test_fr_ledger_01_short_sources_are_not_silently_dropped(tmp_sqlite, tmp_workspace) -> None:
+    from core.db.migrate import apply_migrations
+    from core.ingest import index_document_chunks
+
+    await _apply_base_schema(tmp_sqlite)
+    await _seed_workspace(tmp_sqlite)
+    await apply_migrations(tmp_sqlite)
+    await _insert_document(tmp_sqlite, doc_id="doc_short", relative_path="docs/short.md")
+    await index_document_chunks(tmp_sqlite, "doc_short", tmp_workspace, content="Refunds expire after 30 days.")
+    rows = await _fetch_all(tmp_sqlite, "SELECT disposition FROM acw_chunk_ledger")
+    assert rows == [{"disposition": "pending"}]
+
+
 async def _apply_base_schema(db: aiosqlite.Connection) -> None:
     await db.executescript(BASE_SCHEMA.read_text(encoding="utf-8"))
     await db.commit()

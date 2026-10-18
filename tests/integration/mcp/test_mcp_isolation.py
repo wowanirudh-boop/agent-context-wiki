@@ -10,10 +10,6 @@ import json
 import asyncpg
 import pytest
 
-# MCP path already added by tests/integration/mcp/conftest.py
-from vaultfs.postgres import PostgresVaultFS
-import db as mcp_db
-
 USER_A_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 USER_B_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
@@ -41,7 +37,10 @@ async def pg_pool():
     """
     from pathlib import Path
     db_url = os.environ["DATABASE_URL"]
-    pool = await asyncpg.create_pool(db_url, min_size=2, max_size=5)
+    try:
+        pool = await asyncpg.create_pool(db_url, min_size=2, max_size=5, timeout=2)
+    except (OSError, TimeoutError):
+        pytest.skip("Local PostgreSQL is not available")
 
     await pool.execute("DROP SCHEMA IF EXISTS public CASCADE")
     await pool.execute("CREATE SCHEMA public")
@@ -53,8 +52,12 @@ async def pg_pool():
 
 
 @pytest.fixture(autouse=True)
-async def seed_and_bind_pool(pg_pool):
+async def seed_and_bind_pool(pg_pool, mcp_imports):
     """Seed two tenants and point mcp.db's global pool at the test pool."""
+    global PostgresVaultFS, mcp_db
+    from vaultfs.postgres import PostgresVaultFS
+    import db as mcp_db
+
     # Point mcp/db.py's global _pool at our test pool
     mcp_db._pool = pg_pool
 

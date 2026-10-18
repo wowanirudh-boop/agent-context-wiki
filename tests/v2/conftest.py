@@ -9,6 +9,11 @@ import pytest
 from tests.v2.fakes.fake_llm import FakeLLM
 
 
+@pytest.fixture(autouse=True)
+def offline_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ACW_LLM_PROVIDER", "fake-rules")
+
+
 @pytest.fixture
 def tmp_workspace(tmp_path: Path) -> Path:
     workspace = tmp_path / "workspace"

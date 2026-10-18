@@ -81,7 +81,46 @@ async def test_fr_rev_03_each_decision_applies_exact_table_effects(
         merged = json.loads(follow_up["candidate_json"])
         assert follow_up["row_kind"] == "needs_review"
         assert merged["content"] == "Refund retries use 3 attempts.\n\nRefund retries use 2 attempts."
+        follow_up_files = list((tmp_workspace / "wiki/_reviews").glob("*followup*.md"))
+        assert len(follow_up_files) == 1
+        assert "needs_review" in follow_up_files[0].read_text(encoding="utf-8")
+        assert existing.pending_review_ids and fixture.row_id not in existing.pending_review_ids
+    elif decision != ReviewDecision.needs_more_info and existing is not None:
+        assert fixture.row_id not in existing.pending_review_ids
+        assert f"pending review: {fixture.row_id}" not in (tmp_workspace / fixture.page_path).read_text(encoding="utf-8")
     assert {"kind": "decision.applied"} in events
+
+
+@pytest.mark.asyncio
+async def test_fr_rev_04_review_kind_cannot_override_database_identity(tmp_workspace: Path, tmp_sqlite: aiosqlite.Connection) -> None:
+    from core.review.apply import ReviewValidationError, apply_review_file
+
+    fixture = await _seed_review_case(tmp_workspace, tmp_sqlite, decision="accept_new")
+    text = fixture.review_path.read_text(encoding="utf-8").replace(" · conflict · ", " · exclusion · ")
+    fixture.review_path.write_text(text.replace("accept_new", "approve_exclusion"), encoding="utf-8")
+    with pytest.raises(ReviewValidationError, match="kind"):
+        await apply_review_file(tmp_workspace, tmp_sqlite, fixture.review_path, provider=FakeLLM.rule_based())
+
+
+@pytest.mark.asyncio
+async def test_fr_reg_03_review_merge_executes_taxonomy_operation(tmp_workspace: Path, tmp_sqlite: aiosqlite.Connection) -> None:
+    from core.db.dao import ACWDao
+    from core.review.apply import apply_review_file
+    from core.review.emit import emit_review_file
+    from tests.v2.unit.test_m8_lint_eval_taxonomy_lock import _seed_taxonomy_workspace
+
+    ids = await _seed_taxonomy_workspace(tmp_workspace, tmp_sqlite)
+    dao = ACWDao(tmp_sqlite)
+    await dao.create_run(run_id="run_taxonomy")
+    await dao.create_review_row(run_id="run_taxonomy", page_id=ids["old_page"], row_kind="taxonomy_merge",
+                                recommendation="merge", candidate_json=json.dumps({"page_id": ids["new_page"],
+                                "title": "New Page", "path": "wiki/new-page.md", "similarity": 0.9}))
+    path = await emit_review_file(tmp_workspace, tmp_sqlite, "run_taxonomy")
+    path.write_text(path.read_text(encoding="utf-8").replace("- decision:", "- decision: merge"), encoding="utf-8")
+    await apply_review_file(tmp_workspace, tmp_sqlite, path, provider=FakeLLM.rule_based())
+    row = await dao.get_page(ids["old_page"])
+    assert row["status"] == f"merged_into:{ids['new_page']}"
+    assert "Old page fact." in (tmp_workspace / "wiki/new-page.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

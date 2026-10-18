@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -105,6 +106,20 @@ def test_acw_auto_process_config_defaults_off_and_env_enables_hook(tmp_workspace
     assert load_config(tmp_workspace, environ={"ACW_AUTO_PROCESS": "1"}).auto_process is True
 
 
+def test_fr_lock_01_checking_another_live_process_does_not_signal_it() -> None:
+    from core.lock import _is_stale
+
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    try:
+        assert not _is_stale({"pid": process.pid})
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.wait(timeout=0.2)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
 @pytest.mark.asyncio
 async def test_fr_reg_03_merge_pages_moves_blocks_redirects_and_rewrites_inbound_links(
     tmp_workspace: Path,
@@ -113,6 +128,8 @@ async def test_fr_reg_03_merge_pages_moves_blocks_redirects_and_rewrites_inbound
     from core.taxonomy import merge_pages
 
     ids = await _seed_taxonomy_workspace(tmp_workspace, tmp_sqlite)
+    source_path = tmp_workspace / "wiki/old-page.md"
+    source_path.write_text(source_path.read_text(encoding="utf-8") + "\nA manual note must survive the merge.\n", encoding="utf-8")
 
     result = await merge_pages(tmp_workspace, "Old Page", "New Page")
 
@@ -126,6 +143,33 @@ async def test_fr_reg_03_merge_pages_moves_blocks_redirects_and_rewrites_inbound
     moved_block = await _fetch_one(tmp_sqlite, "SELECT page_id FROM acw_blocks WHERE id = 'cb_old'")
     assert source_page["status"] == f"merged_into:{ids['new_page']}"
     assert moved_block["page_id"] == ids["new_page"]
+    from core.db.dao import ACWDao
+    from core.registry import PageRegistry
+
+    assert (await PageRegistry(ACWDao(tmp_sqlite)).resolve_page("Old Page"))["id"] == ids["new_page"]
+    assert "A manual note must survive" in (tmp_workspace / "wiki/new-page.md").read_text(encoding="utf-8")
+
+
+async def test_fr_reg_03_merge_refuses_unresolved_current_key_collision(
+    tmp_workspace: Path, tmp_sqlite: aiosqlite.Connection,
+) -> None:
+    from core.blocks.parser import parse_page
+    from core.taxonomy import merge_pages
+
+    await _seed_taxonomy_workspace(tmp_workspace, tmp_sqlite)
+    path = tmp_workspace / "wiki/old-page.md"
+    model = parse_page(path.read_text(encoding="utf-8"))
+    target = parse_page((tmp_workspace / "wiki/new-page.md").read_text(encoding="utf-8"))
+    model.blocks[0].key = target.blocks[0].key
+    path.write_text(serialize_page(model), encoding="utf-8")
+    await tmp_sqlite.execute("UPDATE acw_blocks SET key = ? WHERE id = 'cb_old'", (target.blocks[0].key,))
+    await tmp_sqlite.commit()
+    before = {p: p.read_bytes() for p in (tmp_workspace / "wiki").glob("*.md")}
+    with pytest.raises(ValueError, match="Resolve competing current blocks before merging"):
+        await merge_pages(tmp_workspace, "Old Page", "New Page")
+    assert {p: p.read_bytes() for p in before} == before
+    row = await _fetch_one(tmp_sqlite, "SELECT page_id FROM acw_blocks WHERE id = 'cb_old'")
+    assert row["page_id"] == "pg_old"
 
 
 @pytest.mark.asyncio
@@ -144,6 +188,16 @@ async def test_fr_reg_03_rename_page_rewrites_links_and_leaves_redirect_stub(
     assert "[[Renamed Page]]" in (tmp_workspace / "wiki" / "inbound.md").read_text(encoding="utf-8")
     page = await _fetch_one(tmp_sqlite, "SELECT title, path FROM acw_pages WHERE id = 'pg_new'")
     assert page == {"title": "Renamed Page", "path": "wiki/renamed-page.md"}
+
+
+async def test_fr_reg_03_rename_same_slug_preserves_all_blocks(tmp_workspace: Path, tmp_sqlite: aiosqlite.Connection) -> None:
+    from core.taxonomy import rename_page
+
+    await _seed_taxonomy_workspace(tmp_workspace, tmp_sqlite)
+    await rename_page(tmp_workspace, "New Page", "New page")
+    text = (tmp_workspace / "wiki/new-page.md").read_text(encoding="utf-8")
+    assert "cb_new" in text
+    assert "Renamed to" not in text
 
 
 @pytest.mark.asyncio

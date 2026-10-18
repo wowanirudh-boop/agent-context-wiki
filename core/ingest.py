@@ -90,7 +90,49 @@ async def seed_existing_document_chunks(
     *,
     content: str | None = None,
 ) -> None:
-    await index_document_chunks(db, document_id, workspace, content=content, replace=False)
+    rows = await _document_chunks(db, document_id)
+    await index_document_chunks(db, document_id, workspace, content=content, replace=not rows)
+
+
+async def extract_pending_sources(db: aiosqlite.Connection, workspace: Path, *, max_attempts: int) -> None:
+    """FR-LEDGER-01/NFR-03: extraction failures are tracked before placement."""
+    from domain.local_processor import process_document
+
+    dao = ACWDao(db)
+    ledger = ChunkLedger(dao, max_attempts=max_attempts)
+    documents = await fetch_all(await db.execute(
+        "SELECT * FROM documents WHERE source_kind = 'source' AND status IN ('pending', 'processing', 'failed') "
+        "AND COALESCE(error_message, '') != 'Source file removed' ORDER BY relative_path",
+    ))
+    for document in documents:
+        if is_acw_source_excluded(str(document["relative_path"])):
+            continue
+        version = await _ensure_source_version(db, document, workspace, document.get("content") or "")
+        failure = await fetch_one(await db.execute(
+            "SELECT * FROM acw_chunk_ledger WHERE source_id = ? AND source_version_id = ? "
+            "AND content_hash = ?",
+            (document["id"], version["id"], f"extraction:{version['version_hash']}"),
+        ))
+        if failure and failure["disposition"] == "failed_final":
+            continue
+        if failure and failure["disposition"] == "failed":
+            await ledger.mark_pending_for_retry(str(failure["id"]))
+        await db.execute("UPDATE documents SET status = 'pending' WHERE id = ?", (document["id"],))
+        await db.commit()
+        await process_document(db, str(document["id"]), workspace)
+        extracted = await fetch_one(await db.execute("SELECT status, error_message FROM documents WHERE id = ?", (document["id"],)))
+        if extracted["status"] == "ready" and await _document_chunks(db, str(document["id"])):
+            if failure:
+                await ledger.mark_superseded(str(failure["id"]), reason="extraction succeeded")
+            continue
+        failure = failure or await ledger.create_pending_chunk(
+            source_id=str(document["id"]), source_version_id=str(version["id"]),
+            content_hash=f"extraction:{version['version_hash']}", ordinal=0,
+        )
+        reason = extracted["error_message"] or "No extractable text; supply a text export for this source."
+        await ledger.mark_failed(str(failure["id"]), reason=reason)
+        await db.execute("UPDATE documents SET status = 'failed', error_message = ? WHERE id = ?", (reason, document["id"]))
+        await db.commit()
 
 
 def chunk_content_hash(content: str) -> str:
@@ -269,9 +311,13 @@ async def _document_chunks(db: aiosqlite.Connection, document_id: str) -> list[R
 
 
 def _chunk_text(content: str) -> list[Any]:
-    from services.chunker import chunk_text
+    from api.services.chunker import Chunk, chunk_text
 
-    return chunk_text(content)
+    chunks = chunk_text(content, min_chunk_tokens=1)
+    # FR-LEDGER-01: even a one-line rule must enter the ledger.
+    if not chunks and content.strip():
+        return [Chunk(index=0, content=content, page=None, start_char=0, token_count=max(1, len(content) // 4))]
+    return chunks
 
 
 def _metadata_with_source_kind(metadata_raw: Any, relative_path: str, file_type: str | None) -> dict[str, Any]:

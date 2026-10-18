@@ -67,3 +67,97 @@ the PRD.
   The checkpoint is about a source's irrelevant-chunk ratio rather than a page conflict; making
   `page_id` nullable for `row_kind=exclusion` avoids inventing placeholder pages while preserving
   DB-backed review-row identity.
+- **2026-10-19 · M9 · Replace the invariant scaffold with checks against persisted SQLite and page bytes.**
+  The previous helper returned without checking anything. I1–I9 now validate dispositions,
+  links, block inventory/status, round trips, evidence, generated coverage, pending-review
+  markers, and active-key uniqueness. I10 accepts a source-hash snapshot captured before an
+  operation. Seeded-corruption tests prove these checks detect defects.
+- **2026-10-19 · M9 · Strict response schemas describe every field at C1–C7.**
+  Pydantic response contracts generate closed JSON objects with all properties required;
+  optional values are nullable, as required by the OpenAI Responses structured-output API.
+  C1/C6 must account for every input ID. The SDK transport closes clients, records usage and
+  failed/incomplete responses, and counts calls. Tests use a fake transport, never a live key.
+  Reference: https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses
+- **2026-10-19 · M9 · Preserve complete excerpts, short tails, and complete flow documents.**
+  The local chunking path opts into a minimum of one token; the shared chunker's default
+  remains unchanged for existing callers. Full-source flow conversion produces one block
+  linked to all participating chunks. Excerpts are no longer truncated in the middle.
+  Page writes explicitly preserve LF bytes on Windows for round-trip integrity.
+- **2026-10-19 · M9 · Track extraction failures without adding schema fields or dispositions.**
+  CLI processing invokes the existing local extractor. A source that cannot produce text
+  receives one failure record with nullable `document_chunk_id`, ordinal 0 and a synthetic
+  `content_hash` of `extraction:<version_hash>`. It retries through the ordinary pending/
+  failed/failed_final states; successful extraction supersedes the failure record. Unchanged
+  binary sources retain extracted content and retry history. Original source files stay untouched.
+- **2026-10-19 · M9 · Keep chunk disposition pending review until all its topics are decided.**
+  Clean placements remain linked when another placement conflicts. After decisions, chunks
+  with remaining reviews stay `conflicted_pending`; otherwise any retained placement means
+  `placed`. D9's duplicate result applies only when no placement was retained. Invalid model
+  batches record failures and exhaust the configured retries instead of leaving silent pending work.
+- **2026-10-19 · M9 · Treat competing same-key distinct judgments as ambiguous updates.**
+  Two current values for one key violate FR-LINT-03. A distinct judgment on an occupied key
+  therefore produces an `ambiguous_update` review. Duplicate judgments from another source
+  also require review under FR-CONF-03; same-source duplicates retain the automatic path.
+- **2026-10-19 · M9 · Emit actionable reviews for source staleness and merge drafts.**
+  A needs-review row without a candidate accepts `keep_existing`, `deprecate_existing`, or
+  `needs_more_info`. An unchanged same-source block can regain current status after re-ingestion.
+  Merge drafts immediately receive a follow-up review and matching marker. Applying a review
+  verifies its database row kind and run, clears resolved markers, and regenerates conflict listings.
+- **2026-10-19 · M9 · User-edited content may carry review metadata.**
+  Adding/removing a pending marker preserves the content and excerpt exactly, like status
+  changes already did. Replacing user-edited content remains forbidden. This lets agents see
+  contested user-edited facts without losing the user's writing.
+- **2026-10-19 · M9 · Settle transcript supersession before declaring a run complete.**
+  The pre-pass sees the whole pending transcript. Temporary survivor references resolve to
+  real blocks, inherit a failed survivor's tracked failure, or share its pending review.
+  Superseded statements become duplicates of the approved survivor after that review is applied.
+- **2026-10-19 · M9 · Taxonomy operations refresh the read surface.**
+  Merge/split/rename refresh coverage, summaries, the index and exports. Merges retain manual
+  prose and transfer aliases to the active target; moved blocks carry review-row page references.
+  A rename that keeps the same path cannot replace its own content with a redirect.
+- **2026-10-19 · M9 · Lock before indexing and queue watcher writes.**
+  `process` acquires the workspace lock before scanning. Watcher indexing and extraction wait
+  for the same lock. A clean placement re-reads and retries one concurrent page write; block
+  metadata is persisted only after that write succeeds. Related-page links are now rendered
+  through the parsed model. Proposed new page titles also resolve existing aliases.
+- **2026-10-19 · M9 · Correct test fixtures rather than relaxing production requirements.**
+  The bounded-read fixture includes both the 30s source and a nested 45s overlay; it now
+  explicitly approves conflicts and requests history when checking both versions. The old
+  test incorrectly expected both versions to be current without review. SDK mocks include
+  usage/status/close. Integration fixtures isolate API/MCP module namespaces, use valid PDF
+  signatures, authenticate converter requests and mock its current streaming/subprocess
+  interfaces. Hosted production code and converter code are unchanged.
+- **2026-10-19 · M9 · Use one reproducible release gate and a cross-platform quickstart.**
+  `make check` includes integration tests and one coverage run; CI invokes the same target.
+  Setup is cached until requirements change. Missing PostgreSQL skips only database-dependent
+  tests. The Python quickstart tests process, repeat-run idempotency, change/review/apply,
+  invariants, lint, eval, coverage and MCP config. Its Bash entrypoint is preserved; an explicit
+  smoke directory is never removed. Live-model smoke remains opt-in with credentials.
+- **2026-10-19 · M9 · Validate structural loss and invalid transcript supersession.**
+  Flow responses must retain the source node/edge counts. Transcript supersession must point
+  forward to a relevant survivor, never to itself or an earlier statement. The whole-source
+  transcript pre-pass is followed by placement calls bounded by the configured batch size.
+  An invalid summary is logged and skipped after retry, preserving successfully placed blocks;
+  a later run can retry that unfinished derived summary.
+- **2026-10-19 · M9 · Rebuild binary extraction and retain short pages.**
+  An unchanged ready binary source whose extraction rows were removed by `reindex` returns to
+  extraction. Local PDF/spreadsheet chunking retains short individual pages/tabs, not only
+  short whole documents. Hosted chunking keeps its original minimum by default.
+- **2026-10-19 · M9 · Enforce semantic identity after similarity retrieval.**
+  The judge still compares retrieved candidates, but different keys cannot duplicate or
+  conflict (PRD section 2). Similar wording is not sufficient to discard another attribute.
+- **2026-10-19 · M9 · Guard taxonomy merges and complete placement context.**
+  Merging pages with competing current/needs-review keys aborts before moving blocks; the
+  user must resolve those facts first. This preserves FR-LINT-03 without auto-resolving a
+  conflict. C1 now explicitly receives the canonical section list required by FR-PLACE-07.
+  The invariant checker and quickstart close SQLite handles explicitly so Windows can
+  remove the generated temporary workspace after successful verification.
+- **2026-10-19 · M9 · Pass the repository path to the local API subprocess.**
+  `serve` starts the backend from `api/`; it now includes the repository root in `PYTHONPATH`
+  so local extraction and the shared v2 engine import correctly. A subprocess regression
+  checks this without relying on pytest's import paths. Hosted startup is unchanged.
+- **2026-10-19 · M9 · Exercise the real MCP launch on Windows.**
+  Windows `execvp` loses argument quoting for paths containing spaces. The Windows CLI
+  now uses `subprocess.call` with an argument list; POSIX retains `execvp`. A real stdio
+  client regression initializes the server and calls all four v2 read tools against a
+  generated wiki in a path containing spaces.
