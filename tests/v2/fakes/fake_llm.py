@@ -82,7 +82,7 @@ def _rule_based_response(call_site: str, payload: StructuredPayload) -> Structur
     if call_site == "C2":
         return _rule_based_flow(payload)
     if call_site == "C3":
-        return _rule_based_conflict(payload)
+        return {**_rule_based_conflict(payload), "resolved_key": None}
     if call_site == "C4":
         return {"content": _merge_content(payload), "excerpt_policy": "keep_both"}
     if call_site == "C5":

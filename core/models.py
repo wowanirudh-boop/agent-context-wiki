@@ -171,6 +171,7 @@ class FlowResponse(ACWBaseModel):
 class ConflictResponse(ACWBaseModel):
     verdict: Literal["distinct", "duplicate", "conflict"]
     conflict_type: ConflictType | None
+    resolved_key: str | None
     recommendation: Literal[
         "accept_new", "keep_existing", "merge", "mark_conflicted",
         "deprecate_existing", "reject_new", "delete_duplicate", "needs_more_info",

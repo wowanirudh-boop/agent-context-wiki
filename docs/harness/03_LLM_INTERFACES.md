@@ -51,7 +51,14 @@ compares counts. The flow block's excerpt = verbatim source structure (or path r
 Pairwise: candidate block vs one retrieved comparison block (same payload fields: key, type,
 content, excerpt, source_path, source_date). Output:
 `{"verdict":"distinct"|"duplicate"|"conflict","conflict_type":<§6 enum|null>,
-"recommendation":<decision enum>,"rationale":"…"}`.
+"recommendation":<decision enum>,"rationale":"…","resolved_key":<existing key|null>}`.
+When different keys describe the same entity and attribute, `resolved_key` proposes the
+existing key for the candidate. Rationale must explain the match using both excerpts;
+similar wording or values alone are insufficient. Distinct entities, attributes, or
+independently applicable scopes remain separate. Uncertain identity means null. Code
+rejects invented keys and a non-null key with `distinct`; older responses omitting the
+field are treated as null. Proposed matches enter review, including duplicate judgments
+from the same source with different literal keys. No permanent alias is inferred.
 The *recommendation basis* (`source_date` vs `mtime`) is computed by code, not the model
 (FR-CONF-04): code picks the timestamp pair, passes it in, and records which was used.
 Exact-duplicate short-circuit (same key + same source path + normalized-equal content) is

@@ -13,6 +13,10 @@ and updates when your files change. Your original files stay untouched.
 - Tracks what was used, excluded, or could not be processed.
 - Lets connected AI agents search the wiki and read summaries or full pages.
 
+Conflict checks also look across pages and separate documents. Different labels for the
+same fact can be matched, but disagreements still need your review. Detection can miss
+matches; it is not a guarantee that every contradiction will be found.
+
 This version runs on your computer. Building a wiki from your own files requires an
 AI model or a connected agent. The included demo works without an API key.
 

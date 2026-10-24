@@ -125,7 +125,6 @@ def validate_c2_response(payload: StructuredPayload, response: StructuredRespons
 
 
 def validate_c3_response(payload: StructuredPayload, response: StructuredResponse) -> StructuredResponse:
-    del payload
     verdict = _string(response, "verdict")
     if verdict not in {"distinct", "duplicate", "conflict"}:
         raise CallValidationError(f"Unknown C3 verdict: {verdict}")
@@ -140,6 +139,16 @@ def validate_c3_response(payload: StructuredPayload, response: StructuredRespons
         raise CallValidationError(f"Unknown C3 recommendation: {recommendation}")
     if not _string(response, "rationale").strip():
         raise CallValidationError("C3 rationale is required")
+    # Older responses without a match proposal retain literal-key comparison.
+    resolved_key = _nullable_string(response, "resolved_key")
+    if resolved_key is not None:
+        existing = payload.get("existing", {})
+        if not isinstance(existing, Mapping) or resolved_key != existing.get("key") or verdict == "distinct":
+            raise CallValidationError("C3 resolved_key must be the existing key for a non-distinct fact")
+        try:
+            validate_semantic_key(resolved_key)
+        except SemanticKeyError as exc:
+            raise CallValidationError("C3 resolved_key must be a valid semantic key") from exc
     return response
 
 

@@ -116,6 +116,10 @@ class PlacementWriter:
                 )
             return PlacementOutcome(kind="duplicate", block_id=detection.existing.block.id)
         if detection.kind == "conflict" and detection.existing is not None:
+            if detection.resolved_key is not None:
+                # Only the unaccepted candidate adopts the proposed canonical key.
+                # Existing blocks and source evidence stay unchanged until review.
+                block = block.model_copy(update={"key": detection.resolved_key})
             page = await self.registry.get_page(detection.existing.page_id)
             recommendation = detection.recommendation.value if detection.recommendation is not None else "needs_more_info"
             row = await self.dao.create_review_row(

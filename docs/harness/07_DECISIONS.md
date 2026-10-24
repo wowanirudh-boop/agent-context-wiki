@@ -12,7 +12,7 @@ the PRD.
 - **Q2 (pre-approved merge text):** **Yes.** `notes:` beginning `approved-merge:` applies the
   merged content immediately, skipping the second review round (02_DATA_CONTRACTS §7).
 - **Q3 (embeddings):** **No embeddings in MVP.** Conflict-candidate retrieval = semantic-key
-  exact/prefix match + FTS5 over target and registry-linked pages. The eval harness measures
+  exact/prefix match + FTS5, extended to unlinked active pages by the 2026-10-24 decision below. The eval harness measures
   conflict recall; embeddings are a post-MVP decision gated on that measurement.
 
 ## Harness architectural decisions (made for the PRD's "decide, don't list options" rule)
@@ -161,3 +161,23 @@ the PRD.
   now uses `subprocess.call` with an argument list; POSIX retains `execvp`. A real stdio
   client regression initializes the server and calls all four v2 read tools against a
   generated wiki in a path containing spaces.
+- **2026-10-24 · M9 follow-up · Find equivalent facts across pages at the user's request.**
+  FR-CONF-01 now adds exact keys from every active page and a separate FTS5 pass over
+  unlinked pages. Local and workspace keyword searches each return at most eight additional
+  blocks; exact keys are not truncated. This preserves local priority without starving the
+  workspace search. Block type names are excluded from search text because words such as
+  `rule` do not identify a fact. Comparisons still use C3 only; no embeddings or dependencies.
+  Broader retrieval may add model calls for new/changed chunks; unchanged runs still call none.
+  The original retrieval test's exclusion of all unlinked pages was intentionally replaced
+  with an ordering assertion because that old scope contradicts the requested extension.
+- **2026-10-24 · M9 follow-up · Explicit pairwise key resolution, always reviewed.**
+  C3 gains nullable `resolved_key`, constrained to the compared existing key, and explicit
+  instructions to distinguish entities, attributes and independent scopes. Different keys
+  without this proposal still cannot conflict or deduplicate. The unaccepted candidate
+  adopts the proposed key in its review row so ordinary decisions, including `accept_new`,
+  behave consistently. Content, excerpts, source paths and existing block keys are unchanged.
+  No persistent alias is created: a model's pairwise match must not become a general rule.
+  Even a same-source duplicate verdict with a newly resolved key requires review. Older C3
+  responses missing the field retain literal-key behavior; the current schema requires the
+  nullable field. Regression tests cover separate source files, unlinked pages, alternative
+  labels, unrelated delivery facts, invalid model keys, three decisions, and unchanged runs.

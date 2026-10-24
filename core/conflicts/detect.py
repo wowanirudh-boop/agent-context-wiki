@@ -47,6 +47,7 @@ class JudgeResult:
     recommendation: ReviewDecision
     rationale: str
     recommendation_basis: Literal["source_date", "mtime"]
+    resolved_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,7 @@ class ConflictDetectionResult:
     recommendation: ReviewDecision | None = None
     rationale: str | None = None
     recommendation_basis: Literal["source_date", "mtime"] | None = None
+    resolved_key: str | None = None
 
 
 async def retrieve_comparison_candidates(
@@ -68,27 +70,29 @@ async def retrieve_comparison_candidates(
     limit: int = 8,
 ) -> list[ComparisonBlock]:
     dao = ACWDao(db)
-    pages = await PageRegistry(dao).list_pages()
+    pages = [page for page in await PageRegistry(dao).list_pages() if page["status"] == "active"]
     page_ids = _target_and_related_page_ids(Path(workspace), target_page, pages)
-    comparisons = await _comparison_blocks_for_pages(Path(workspace), dao, pages, page_ids)
+    other_ids = [str(page["id"]) for page in pages if page["id"] not in page_ids]
+    comparisons = await _comparison_blocks_for_pages(Path(workspace), dao, pages, page_ids + other_ids)
 
     selected: list[ComparisonBlock] = []
     selected_ids: set[str] = set()
     for comparison in comparisons:
-        if comparison.page_id != target_page["id"]:
-            continue
-        if _key_matches(candidate.key, comparison.block.key):
+        # FR-CONF-01: exact identities cannot be hidden by page placement or FTS limits.
+        if candidate.key == comparison.block.key or (
+            comparison.page_id == target_page["id"] and _key_matches(candidate.key, comparison.block.key)
+        ):
             selected.append(_with_reason(comparison, "key"))
             selected_ids.add(comparison.block.id)
 
-    for block_id in await _fts_block_ids(db, candidate, comparisons, limit=limit):
-        if block_id in selected_ids:
-            continue
-        comparison = next(item for item in comparisons if item.block.id == block_id)
-        selected.append(_with_reason(comparison, "fts"))
-        selected_ids.add(block_id)
-        if len(selected) >= limit:
-            break
+    # Keep a separate bounded workspace search so local keyword hits cannot crowd
+    # out a differently named fact on an unlinked page. Reuse the C3 judge.
+    by_id = {item.block.id: item for item in comparisons}
+    for scope, reason in ((page_ids, "fts"), (other_ids, "workspace_fts")):
+        pool = [item for item in comparisons if item.page_id in scope and item.block.id not in selected_ids]
+        for block_id in await _fts_block_ids(db, candidate, pool, limit=limit):
+            selected.append(_with_reason(by_id[block_id], reason))
+            selected_ids.add(block_id)
     return selected
 
 
@@ -114,9 +118,10 @@ async def detect_candidate_conflict(
         )
         judged = await judge_conflict_pair(provider, candidate, comparison, basis)
         # PRD section 2: retrieval similarity cannot override semantic identity.
-        if candidate.key != comparison.block.key:
+        same_literal_key = candidate.key == comparison.block.key
+        if not same_literal_key and judged.resolved_key != comparison.block.key:
             continue
-        if judged.verdict == "duplicate" and candidate.source_path == comparison.block.source_path:
+        if same_literal_key and judged.verdict == "duplicate" and candidate.source_path == comparison.block.source_path:
             return ConflictDetectionResult(kind="duplicate", existing=comparison)
         if judged.verdict == "conflict":
             return ConflictDetectionResult(
@@ -126,15 +131,15 @@ async def detect_candidate_conflict(
                 recommendation=judged.recommendation,
                 rationale=judged.rationale,
                 recommendation_basis=judged.recommendation_basis,
+                resolved_key=judged.resolved_key,
             )
-        if candidate.key == comparison.block.key:
-            # FR-CONF-03 / FR-LINT-03: a model cannot silently accept competing
-            # values for one key, or discard corroborating evidence from another source.
-            return ConflictDetectionResult(
-                kind="conflict", existing=comparison, conflict_type=ConflictType.ambiguous_update,
-                recommendation=ReviewDecision.needs_more_info, rationale=judged.rationale,
-                recommendation_basis=judged.recommendation_basis,
-            )
+        # FR-CONF-03 / FR-LINT-03: cross-source corroboration and proposed key
+        # matches also need review; they never authorize automatic deduplication.
+        return ConflictDetectionResult(
+            kind="conflict", existing=comparison, conflict_type=ConflictType.ambiguous_update,
+            recommendation=ReviewDecision.needs_more_info, rationale=judged.rationale,
+            recommendation_basis=judged.recommendation_basis, resolved_key=judged.resolved_key,
+        )
     return ConflictDetectionResult(kind="distinct")
 
 
@@ -194,6 +199,7 @@ async def judge_conflict_pair(
         recommendation=ReviewDecision(response["recommendation"]),
         rationale=str(response["rationale"]),
         recommendation_basis=basis.basis,
+        resolved_key=response.get("resolved_key"),
     )
 
 
@@ -316,7 +322,7 @@ def _fts_query(candidate: ContextBlock) -> str:
 
 
 def _search_text(block: ContextBlock) -> str:
-    return f"{block.key}\n{block.type.value}\n{block.content}\n{block.excerpt}"
+    return f"{block.key}\n{block.content}\n{block.excerpt}"
 
 
 def _block_payload(block: ContextBlock) -> dict[str, object]:

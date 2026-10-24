@@ -7,7 +7,9 @@ INSTRUCTIONS: dict[str, str] = {
         "extraction garbage, boilerplate, or navigation debris. 'not typical wiki prose' and "
         "'tabular/row-level data' are NOT valid exclusion reasons. Every irrelevant verdict "
         "requires a concrete per-chunk reason. The domain hint is context for organizing "
-        "placements, not a relevance gate."
+        "placements, not a relevance gate. Reuse a key from any supplied page inventory when "
+        "it names the same entity and attribute, even when placing the block on another page. "
+        "Keep different entities and attributes separate."
     ),
     "C2": (
         "Convert the supplied structured flow definition into Mermaid while preserving every "
@@ -17,7 +19,15 @@ INSTRUCTIONS: dict[str, str] = {
     "C3": (
         "Compare the candidate block with the existing block and decide whether it is distinct, "
         "a duplicate, or a conflict; use the supplied fields only and return a valid conflict "
-        "type and advisory recommendation when a conflict exists."
+        "type and advisory recommendation when a conflict exists. Different source paths and "
+        "different pages do not make facts distinct. When different keys describe the same "
+        "entity and attribute, set resolved_key to the existing block's exact key and explain "
+        "the match using both excerpts in rationale. Values may disagree; that is a conflict. "
+        "Similar words, units, or numbers alone do not establish a match. Different entities "
+        "or attributes are distinct; independently applicable scopes (such as different "
+        "products or regions) are distinct. If identity is uncertain, return resolved_key=null. "
+        "Use null also when keys already match. A distinct verdict must have resolved_key=null. "
+        "Never invent a third key. Timestamp recency is advisory and never resolves a conflict."
     ),
     "C4": (
         "Draft a merged candidate block body from the two conflicting blocks without discarding "

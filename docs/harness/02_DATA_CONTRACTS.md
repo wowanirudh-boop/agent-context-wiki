@@ -118,6 +118,12 @@ Convention: `domain.entity.attribute` (e.g. `refunds.window_days`,
 `agent_studio.nodes.api_call.timeout`). Validation in `core/blocks/keys.py`; invalid keys from
 the LLM are a validation failure → retry once → `failed` disposition.
 
+C3 may propose `resolved_key` (string or null) when differently named keys describe the
+same fact. It must equal the compared existing block's key, and cannot accompany `distinct`.
+The candidate in the review row adopts that key; its source, content and excerpt do not
+change. Existing blocks are unchanged until a decision. This is a match for this pair only,
+not a persistent alias rule; it never authorizes automatic duplicate removal.
+
 ## 4. Context block serialization (FR-BLOCK-03/04/05)
 
 Grammar within a page:

@@ -78,7 +78,9 @@ async def test_fr_conf_01_retrieval_uses_key_match_and_fts_over_target_and_relat
     retrieved = await retrieve_comparison_candidates(tmp_workspace, tmp_sqlite, target, candidate)
 
     assert [item.block.id for item in retrieved][:2] == ["cb_key", "cb_related"]
-    assert "cb_unrelated" not in {item.block.id for item in retrieved}
+    # The workspace fallback now retrieves unlinked pages after local matches.
+    assert retrieved[-1].block.id == "cb_unrelated"
+    assert retrieved[-1].retrieval_reason == "workspace_fts"
 
 
 @pytest.mark.asyncio

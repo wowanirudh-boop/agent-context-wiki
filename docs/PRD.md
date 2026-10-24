@@ -178,7 +178,7 @@ For each `pending` chunk, the pipeline executes:
 
 ### 7.6 Conflict and Duplicate Detection
 
-- **FR-CONF-01.** Detection mechanism (normative): for each candidate block, retrieve comparison candidates by (a) exact and prefix semantic-key match on the target page, then (b) FTS5 search over blocks on the target page and registry-linked related pages. Retrieved candidates are compared pairwise by an LLM judge that outputs one of: `distinct`, `duplicate`, or a conflict type.
+- **FR-CONF-01.** Detection mechanism (normative): for each candidate block, retrieve comparison candidates by (a) exact semantic-key match across active pages and prefix match on the target page, then (b) bounded FTS5 search over the target and registry-linked related pages, then (c) a separate bounded FTS5 search over other active pages. Retrieved candidates are compared pairwise by an LLM judge that outputs one of: `distinct`, `duplicate`, or a conflict type. Different labels may resolve to the existing key only when the judge explicitly identifies the same entity and attribute from the evidence; that proposed match always requires review. Source paths need not match or represent versions of one document.
 - **FR-CONF-02.** Conflict types: `changed_value`, `changed_scope`, `newer_disagrees`, `refinement`, `deprecated_reappears`, `missing_evidence`, `ambiguous_update`.
 - **FR-CONF-03.** The system never auto-resolves. Exception: exact-duplicate (identical key + semantically identical content from the *same source path*) is auto-recorded as `duplicate` without review, since no information is at stake.
 - **FR-CONF-04.** Recommendations are advisory, must cite which timestamp basis was used (`source_date` vs mtime), and must never be auto-applied.

@@ -52,6 +52,18 @@ For the commands below, replace `.venv/bin/python` with `.venv/Scripts/python.ex
 6. Run `.venv/bin/python llmwiki lint <workspace>` and `.venv/bin/python llmwiki eval <workspace>`.
 7. Inspect git history inside `wiki/` for structured process and decision commits.
 
+Conflicts can come from unrelated files, such as a policy saying 30 days and a FAQ saying
+14 days. They do not need to be versions of the same document. Matching fact labels are
+checked across active pages; keyword search also checks pages with no links between them.
+The model can propose that two different labels mean the same fact using both excerpts.
+That proposal goes into review, and only your decision changes which claim is current.
+
+Search is bounded to eight additional matches from the target/linked pages and eight from
+other active pages, plus key matches. It can miss differently worded facts with little shared
+vocabulary, and model judgments can be wrong. The first detected conflict creates a review;
+this is not an exhaustive report of every conflicting pair. Broader checks can add model
+calls when processing changed content; an unchanged completed run still makes none.
+
 ## CLI Reference
 
 - `init <workspace>`: create `.llmwiki/`, `wiki/`, SQLite schema, and initial wiki files.
